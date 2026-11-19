@@ -818,3 +818,22 @@ kbd { background: #1e1f22; border: 1px solid #4e5058; border-bottom-width: 2px; 
   #call-root { right: 10px; bottom: 10px; width: min(320px, calc(100vw - 20px)); }
   .friend-row-actions { max-width: 150px; }
 }
+
+/* ==================== v3: обязательные аккаунты и удаление данных ==================== */
+.auth-pending {
+  display: flex; align-items: center; gap: 8px; background: rgba(88,101,242,.14);
+  border: 1px solid rgba(88,101,242,.32); color: #d8dcff; font-size: 12px;
+  padding: 9px 12px; border-radius: 6px; margin-bottom: 16px;
+}
+.auth-pending .ic { flex: none; color: var(--blurple-hi); }
+.account-actions { display: flex; flex-direction: column; gap: 8px; }
+.account-actions .full { width: 100%; }
+.account-actions .btn-danger.full { justify-content: center; }
+.up-actions { gap: 1px; }
+.up-actions button { width: 28px; }
+.up-actions .up-logout:hover { color: #ffd479; background: rgba(240,178,50,.14); }
+.up-actions .up-delete:hover { color: #ff9b9e; background: rgba(242,63,67,.16); }
+.up-actions button[disabled] { opacity: .35; cursor: default; }
+.up-actions button[disabled]:hover { background: none; color: var(--muted); }
+.account-tab-danger { border-top: 1px solid rgba(255,255,255,.08); margin-top: 14px; padding-top: 14px; }
+.modal-card .notice-red .ic { flex: none; margin-top: 2px; }

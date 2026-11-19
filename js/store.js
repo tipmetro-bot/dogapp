@@ -1,6 +1,6 @@
-// dogapp — хранилище: Firebase Realtime Database (REST) + локальный демо-фолбэк
+// dogapp — хранилище: Firebase Realtime Database (REST) + локальный кэш при недоступности сети
 import { FB_DEFAULT, rid, BANNER_PRESETS, initials } from './util.js';
-import { buildSeed } from './seed.js';
+import { buildEmptyState, collectDemoCleanup } from './seed.js';
 
 const LS_UID  = 'dogapp_uid_v1';
 const LS_FB   = 'dogapp_fb_url_v1';
@@ -73,7 +73,6 @@ export class Store {
     return u;
   }
 
-  // Переключение личности после входа/регистрации
   setUid(uid) {
     if (!uid || /[^a-zA-Z0-9_-]/.test(String(uid))) return;
     this.uid = String(uid);
@@ -105,9 +104,9 @@ export class Store {
       if (remote && Object.keys(obj(remote)).length) {
         this.state = normalize(remote);
       } else {
-        const seed = buildSeed(this.uid);
-        this.state = normalize(seed);
-        try { await this._request('', 'PUT', seed); }
+        const empty = buildEmptyState();
+        this.state = normalize(empty);
+        try { await this._request('', 'PUT', empty); }
         catch (e) {
           this.mode = 'local';
           this.error = 'База доступна только на чтение: ' + (e.message || 'запись запрещена');
@@ -115,15 +114,16 @@ export class Store {
       }
     } else {
       this.mode = 'local';
-      this.state = normalize(cached || buildSeed(this.uid));
+      this.state = normalize(cached || buildEmptyState());
     }
 
-    const createdSelf = !this.state.users[this.uid];
-    this.ensureSelf();
-    if (createdSelf && this.mode === 'firebase') {
-      try { await this._request('/users/' + this.uid, 'PUT', this.state.users[this.uid]); }
-      catch (e) { this.onWriteError(e); }
+    const cleanup = collectDemoCleanup(this.state);
+    if (cleanup.length) {
+      const clean = this.applyChanges(cleanup, true);
+      await this.persistChanges(clean);
     }
+
+    this.ensureSelf();
     this.saveCache();
     this.lastSig = JSON.stringify(this.state);
     this.startPolling();
@@ -152,23 +152,15 @@ export class Store {
     return res.json().catch(() => null);
   }
 
+  // Профиль создаётся только регистрацией. Гостевых записей больше нет.
   ensureSelf() {
     const u = this.state.users[this.uid];
-    if (!u) {
-      this.state.users[this.uid] = {
-        id: this.uid, name: 'Гость', tag: '0001', login: '',
-        avatar: { type: 'text', value: initials('Гость'), color: '#5865f2' }, avatarAnimated: false,
-        banner: BANNER_PRESETS[0].value, bannerAnimated: false,
-        bio: '', status: '', font: 'default', color: '#ffffff',
-        lastSeen: Date.now(), createdAt: Date.now()
-      };
-    } else {
-      u.lastSeen = Date.now();
-      if (!u.font) u.font = 'default';
-      if (typeof u.bannerAnimated !== 'boolean') u.bannerAnimated = false;
-      if (typeof u.avatarAnimated !== 'boolean') u.avatarAnimated = false;
-      if (u.avatar && u.avatar.type === 'emoji') u.avatar = { type: 'text', value: initials(u.name), color: '#5865f2' };
-    }
+    if (!u) return;
+    u.lastSeen = Date.now();
+    if (!u.font) u.font = 'default';
+    if (typeof u.bannerAnimated !== 'boolean') u.bannerAnimated = false;
+    if (typeof u.avatarAnimated !== 'boolean') u.avatarAnimated = false;
+    if (u.avatar && u.avatar.type === 'emoji') u.avatar = { type: 'text', value: initials(u.name || u.login || '?'), color: '#5865f2' };
   }
 
   saveCache() {
@@ -195,19 +187,27 @@ export class Store {
   }
 
   async heartbeat() {
-    if (this.mode !== 'firebase') return;
+    if (this.mode !== 'firebase' || !this.state.users[this.uid]) return;
     try { await this._request('/users/' + this.uid, 'PATCH', { lastSeen: Date.now() }); }
     catch (_) { /* тихо */ }
   }
 
   async sync() {
     if (this.mode !== 'firebase' || this.pending > 0) return;
+    const prevSig = this.lastSig;
     try {
       const remote = await this._read('');
       const data = normalize(remote || {});
-      const sig = JSON.stringify(data);
-      if (sig !== this.lastSig) {
+      const cleanup = collectDemoCleanup(data);
+      if (cleanup.length) {
         this.state = data;
+        const clean = this.applyChanges(cleanup, true);
+        this.persistChanges(clean);
+      } else {
+        this.state = data;
+      }
+      const sig = JSON.stringify(this.state);
+      if (sig !== prevSig) {
         this.lastSig = sig;
         this.saveCache();
         this.emit();
@@ -234,6 +234,38 @@ export class Store {
     if (!silent) this.emit();
   }
 
+  // Один пакет изменений: обновляем состояние и пишем только затронутые узлы Firebase.
+  applyChanges(changes, silent = true) {
+    const seen = new Set();
+    const clean = [];
+    for (const c of changes || []) {
+      if (!c || !Array.isArray(c.path) || !c.path.length) continue;
+      const key = c.method + ':' + c.path.map(String).join('/');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (c.method === 'PUT') setIn(this.state, c.path, c.value);
+      else if (c.method === 'PATCH') patchIn(this.state, c.path, c.value || {});
+      else delIn(this.state, c.path);
+      clean.push(c);
+    }
+    this.bump(silent);
+    return clean;
+  }
+
+  async persistChanges(changes) {
+    if (this.mode !== 'firebase' || !changes?.length) return;
+    this.pending++;
+    try {
+      const results = await Promise.allSettled(changes.map(c => this._request(c.path.map(String).join('/'), c.method, c.value)));
+      const failed = results.find(r => r.status === 'rejected');
+      if (failed) throw failed.reason;
+    } catch (e) {
+      this.onWriteError(e);
+    } finally {
+      this.pending--;
+    }
+  }
+
   _write(path, method, value) {
     if (this.mode !== 'firebase') return;
     const p = path.map(String).join('/');
@@ -251,7 +283,7 @@ export class Store {
     }
     if (!this.warned) {
       this.warned = true;
-      import('./util.js').then(m => m.toast('Firebase не дал записать данные — включён демо-режим. Проверьте правила: read/write = true', 'warn'));
+      import('./util.js').then(m => m.toast('Firebase не дал записать данные — включён локальный режим. Проверьте правила: read/write = true', 'warn'));
     }
   }
 

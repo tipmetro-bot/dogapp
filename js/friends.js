@@ -1,22 +1,25 @@
-// dogapp — система друзей: заявки, список, поиск по логину, блокировка
-import { esc, clamp, relTime, safeColor, bannerCss, nickStyle, plural } from './util.js';
+// dogapp — система друзей: только зарегистрированные аккаунты, без вымышленных участников
+import { esc, clamp, relTime, bannerCss, nickStyle, plural, avatarHtml, isRealAccount, accountName } from './util.js';
 import { icon } from './icons.js';
-import { avatarHtml } from './util.js';
+
+function real(state, id) { return isRealAccount(state.users?.[id], state.accounts); }
 
 export function friendIds(state, uid) {
-  return Object.keys(state.friends?.[uid] || {});
+  return Object.keys(state.friends?.[uid] || {}).filter(id => real(state, id));
 }
 export function isFriend(state, uid, other) {
-  return !!(state.friends?.[uid]?.[other]);
+  return !!(state.friends?.[uid]?.[other]) && real(state, other);
 }
 export function isBlocked(state, uid, other) {
   return !!(state.blocks?.[uid]?.[other]);
 }
 export function requestsIn(state, uid) {
-  return Object.values(state.friendRequests || {}).filter(r => r.to === uid && r.status === 'pending');
+  return Object.values(state.friendRequests || {}).filter(r =>
+    r.to === uid && r.status === 'pending' && real(state, r.from) && real(state, r.to));
 }
 export function requestsOut(state, uid) {
-  return Object.values(state.friendRequests || {}).filter(r => r.from === uid && r.status === 'pending');
+  return Object.values(state.friendRequests || {}).filter(r =>
+    r.from === uid && r.status === 'pending' && real(state, r.from) && real(state, r.to));
 }
 export function hasPending(state, uid, other) {
   return Object.values(state.friendRequests || {}).some(r =>
@@ -26,7 +29,8 @@ export function hasPending(state, uid, other) {
 export function sendRequest(store, toUid) {
   const s = store.state, me = store.uid;
   if (!toUid || toUid === me) throw new Error('Нельзя добавить самого себя');
-  if (!s.users[toUid]) throw new Error('Пользователь не найден');
+  if (!real(s, me)) throw new Error('Нужен зарегистрированный аккаунт');
+  if (!real(s, toUid)) throw new Error('Пользователь не найден');
   if (isFriend(s, me, toUid)) throw new Error('Уже в друзьях');
   if (isBlocked(s, me, toUid) || isBlocked(s, toUid, me)) throw new Error('Пользователь в блокировке');
   if (hasPending(s, me, toUid)) throw new Error('Заявка уже отправлена');
@@ -37,7 +41,7 @@ export function sendRequest(store, toUid) {
 
 export function acceptRequest(store, reqId) {
   const r = store.state.friendRequests?.[reqId];
-  if (!r || r.to !== store.uid) return;
+  if (!r || r.to !== store.uid || !real(store.state, r.from)) return;
   const now = Date.now();
   store.set(['friends', store.uid, r.from], { since: now });
   store.set(['friends', r.from, store.uid], { since: now });
@@ -62,23 +66,23 @@ export function blockUser(store, other) {
 
 export function searchUsers(state, uid, query) {
   const q = String(query || '').toLowerCase().trim();
-  const all = Object.values(state.users || {}).filter(u => u.id !== uid);
+  const all = Object.values(state.users || {}).filter(u => u.id !== uid && isRealAccount(u, state.accounts));
   const list = q
     ? all.filter(u => [u.name, u.login, u.tag].some(v => String(v || '').toLowerCase().includes(q)))
     : all.filter(u => !isFriend(state, uid, u.id) && !isBlocked(state, uid, u.id));
   return list.slice(0, 30);
 }
 
-function online(u, me, id) {
-  return id === me || ((u?.lastSeen || 0) > Date.now() - 120000);
+function online(u) {
+  return (u?.lastSeen || 0) > Date.now() - 120000;
 }
 
 function friendRow(state, me, id) {
-  const u = state.users[id] || { name: 'Участник' };
+  const u = state.users[id];
   return `<div class="friend-row">
-    <span class="avatar-wrap">${avatarHtml(u, 'avatar-md')}<i class="pres ${online(u, me, id) ? 'online' : 'offline'}"></i></span>
+    <span class="avatar-wrap">${avatarHtml(u, 'avatar-md')}<i class="pres ${online(u) ? 'online' : 'offline'}"></i></span>
     <div class="friend-row-main">
-      <b style="${nickStyle(u)}">${esc(clamp(u.name, 30))}</b>
+      <b style="${nickStyle(u)}">${esc(clamp(accountName(u), 30))}</b>
       <span>@${esc(u.login || 'user')} · ${esc(clamp(u.status || relTime(u.lastSeen), 48))}</span>
     </div>
     <div class="friend-row-actions">
@@ -93,10 +97,10 @@ function friendRow(state, me, id) {
 
 function requestRow(state, r, incoming) {
   const other = incoming ? r.from : r.to;
-  const u = state.users[other] || { name: 'Участник' };
+  const u = state.users[other];
   return `<div class="friend-row">
     ${avatarHtml(u, 'avatar-md')}
-    <div class="friend-row-main"><b style="${nickStyle(u)}">${esc(clamp(u.name, 30))}</b><span>@${esc(u.login || 'user')} · ${esc(relTime(r.createdAt))}</span></div>
+    <div class="friend-row-main"><b style="${nickStyle(u)}">${esc(clamp(accountName(u), 30))}</b><span>@${esc(u.login || 'user')} · ${esc(relTime(r.createdAt))}</span></div>
     <div class="friend-row-actions">
       ${incoming
         ? `<button class="btn-mini btn-ok" data-action="friend-accept" data-id="${esc(r.id)}">Принять</button>
@@ -111,7 +115,7 @@ export function friendsViewHtml(store, view) {
   const meUser = s.users[me] || {};
   const tab = view.friendsTab || 'online';
   const ids = friendIds(s, me);
-  const shown = ids.filter(id => tab === 'all' ? true : tab === 'online' ? online(s.users[id], me, id) : !online(s.users[id], me, id));
+  const shown = ids.filter(id => tab === 'all' ? true : tab === 'online' ? online(s.users[id]) : !online(s.users[id]));
   const inc = requestsIn(s, me), out = requestsOut(s, me);
   const q = view.friendQuery || '';
   const results = searchUsers(s, me, q);
@@ -134,7 +138,7 @@ export function friendsViewHtml(store, view) {
         const friend = isFriend(s, me, u.id), pending = hasPending(s, me, u.id), blocked = isBlocked(s, me, u.id);
         return `<div class="friend-row">
           ${avatarHtml(u, 'avatar-md')}
-          <div class="friend-row-main"><b style="${nickStyle(u)}">${esc(clamp(u.name, 30))}</b><span>@${esc(u.login || 'user')} · #${esc(u.tag || '0000')}</span></div>
+          <div class="friend-row-main"><b style="${nickStyle(u)}">${esc(clamp(accountName(u), 30))}</b><span>@${esc(u.login || 'user')} · #${esc(u.tag || '0000')}</span></div>
           <div class="friend-row-actions">
             ${blocked ? '<span class="badge badge-red">заблокирован</span>'
               : friend ? '<span class="badge badge-green">в друзьях</span>'
@@ -144,22 +148,21 @@ export function friendsViewHtml(store, view) {
             ${!blocked ? `<button class="btn-mini btn-mini-red" data-action="friend-block" data-uid="${esc(u.id)}" data-tip="Заблокировать">${icon('shield', 16)}</button>` : ''}
           </div>
         </div>`;
-      }).join('') || '<div class="empty">Никого не нашли</div>'}</div>`;
+      }).join('') || '<div class="empty">Никого не нашли. Люди появятся здесь после регистрации.</div>'}</div>`;
   } else {
-    body = shown.length ? shown.map(id => friendRow(s, me, id)).join('') : '<div class="empty">В этом разделе пока пусто</div>';
+    body = shown.length ? shown.map(id => friendRow(s, me, id)).join('') : '<div class="empty">Здесь пока нет зарегистрированных друзей</div>';
   }
 
   return `<div class="friends-view">
     <div class="friends-hero" style="${esc(bannerCss(meUser.banner, meUser.bannerAnimated))}">
       <div class="friends-hero-shade"></div>
       <div class="friends-hero-text">
-        <div class="free-chip">${icon('bolt', 14)} ВСЁ БЕСПЛАТНО</div>
+        <div class="free-chip">${icon('shield', 14)} ТОЛЬКО РЕАЛЬНЫЕ АККАУНТЫ</div>
         <h1>Друзья</h1>
-        <p>${ids.length} ${plural(ids.length, ['друг', 'друга', 'друзей'])} · ${inc.length} входящих заявок. Звонки и видеозвонки доступны прямо из списка.</p>
+        <p>${ids.length} ${plural(ids.length, ['друг', 'друга', 'друзей'])} · ${inc.length} входящих заявок. В базе нет ботов и подставных людей.</p>
         <div>
           <button class="btn-primary" data-action="friends-tab" data-tab="add">${icon('plus', 16)} Добавить друга</button>
-          <button class="btn-outline" data-action="demo-call" data-type="video">${icon('video', 16)} Демо видеозвонка</button>
-          <button class="btn-outline" data-action="demo-call" data-type="voice">${icon('mic', 16)} Демо звонка</button>
+          <button class="btn-outline" data-action="create-server">${icon('grid', 16)} Создать сервер</button>
         </div>
       </div>
       <img src="assets/logo.svg" alt="" class="friends-hero-logo">

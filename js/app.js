@@ -4,15 +4,16 @@ import { render } from './render.js';
 import { modalHtml, emojiPickerHtml, popoverHtml } from './modals.js';
 import { CallManager } from './calls.js';
 import {
-  getSession, saveSession, enterGuest, logout, isGuest, register, login, changePassword,
-  authPageHtml
+  getSession, clearSession, logout, register, login, changePassword, deleteAccount,
+  sessionIsValid, authPageHtml
 } from './auth.js';
 import {
   sendRequest, acceptRequest, declineRequest, removeFriend, blockUser, friendIds
 } from './friends.js';
 import {
   INVITE_TTL, BANNER_PRESETS, FONT_CHOICES, rid, makeCode, slugify, esc, clamp, safeUrl,
-  copyText, toast, inviteUrl, isExpired, timeLeft, fileToDataUrl, freezeImage, initials
+  copyText, toast, inviteUrl, isExpired, timeLeft, fileToDataUrl, freezeImage, initials,
+  isRealAccount, accountName
 } from './util.js';
 import { emoteSet, DEFAULT_EMOTES, buildEmoteIndex } from './emojis.js';
 
@@ -25,7 +26,7 @@ const view = {
   search: '', dmQuery: '', showMembers: true, collapsed: new Set(),
   drafts: {}, replyTo: null, editing: null, pendingAttachment: null,
   modal: null, modalTab: 'overview', picker: null, popover: null, invitePage: null,
-  authScreen: false, authMode: 'login', authError: '',
+  authScreen: true, authMode: 'register', authError: '', pendingInvite: null,
   voiceChannelId: null,
   mic: true, deaf: false
 };
@@ -44,6 +45,27 @@ const lineTimer = setInterval(() => {
   if (n) n.textContent = LOAD_LINES[lineIdx];
 }, 420);
 
+function setAuthScreen(pendingInvite = null) {
+  if (!sessionIsValid()) clearSession();
+  view.authScreen = true;
+  view.authMode = 'register';
+  view.authError = '';
+  view.pendingInvite = pendingInvite || null;
+  view.invitePage = null;
+  view.modal = null;
+  view.popover = null;
+  view.picker = null;
+  view.voiceChannelId = null;
+}
+
+function showAuth(pendingInvite = null, notify = true) {
+  setAuthScreen(pendingInvite);
+  refreshAuth();
+  render(store, view);
+  refreshOverlays();
+  if (notify) toast('Войдите или зарегистрируйтесь, чтобы продолжить', 'warn');
+}
+
 async function boot() {
   const session = getSession();
   if (session?.uid) store.setUid(session.uid);
@@ -54,25 +76,28 @@ async function boot() {
 
   clearInterval(lineTimer);
   $('loader-status').textContent = 'Готово.';
-  $('loader-conn').textContent = mode === 'firebase' ? 'Firebase подключён' : 'Демо-режим (localStorage)';
+  $('loader-conn').textContent = mode === 'firebase' ? 'Firebase подключён' : 'Локальный режим (кэш браузера)';
   $('loader').classList.add('loader-out');
   setTimeout(() => { $('loader').hidden = true; }, 520);
 
   callManager = new CallManager(store, view);
   setupEvents();
   store.on(() => {
+    if (!view.authScreen && !sessionIsValid()) { showAuth(view.pendingInvite || parseHash() || null, false); return; }
     render(store, view);
     refreshOverlays(true);
     if (callManager) callManager.update();
   });
 
   const hash = parseHash();
-  if (hash) {
-    view.invitePage = hash;
+  if (!sessionIsValid()) {
+    setAuthScreen(hash);
+  } else if (hash) {
     view.authScreen = false;
-  } else if (!session) {
-    view.authScreen = true;
+    view.invitePage = hash;
+    view.pendingInvite = null;
   } else {
+    view.authScreen = false;
     const first = store.myServers()[0];
     if (first) selectServer(first.id, true);
     else view.section = 'home';
@@ -83,30 +108,35 @@ async function boot() {
   if (callManager) callManager.update();
 
   if (mode === 'local' && !view.authScreen) {
-    setTimeout(() => toast('Firebase недоступен из браузера — демо-режим. Укажите базу в «Настройки → Подключение».', 'warn'), 900);
+    setTimeout(() => toast('Нет связи с Firebase — включён локальный режим. Укажите базу в «Настройки → Подключение».', 'warn'), 900);
   }
   setInterval(() => { render(store, view); refreshOverlays(); }, 30000);
 }
 
 function refreshAuth() {
   const el = $('auth-page');
-  el.innerHTML = view.authScreen ? authPageHtml(view.authMode, view.authError) : '';
+  el.innerHTML = view.authScreen ? authPageHtml(view.authMode, view.authError, view.pendingInvite) : '';
   el.hidden = !view.authScreen;
 }
 
 function startApp() {
   view.authScreen = false;
   refreshAuth();
+  if (view.pendingInvite) {
+    const code = view.pendingInvite;
+    view.pendingInvite = null;
+    view.invitePage = code;
+    render(store, view);
+    refreshOverlays();
+    return;
+  }
+  if (view.invitePage) clearHash();
   const first = store.myServers()[0];
   if (first) selectServer(first.id, true);
   else view.section = 'home';
   render(store, view);
   refreshOverlays();
   if (callManager) callManager.update();
-}
-
-function ensureGuestSession() {
-  if (!getSession()) { enterGuest(); view.authScreen = false; refreshAuth(); }
 }
 
 /* ======================= НАВИГАЦИЯ ======================= */
@@ -117,6 +147,7 @@ function parseHash() {
 function clearHash() {
   if (location.hash) history.replaceState(null, '', location.pathname + location.search);
   view.invitePage = null;
+  view.pendingInvite = null;
 }
 function currentKey() {
   if (view.section === 'server' && view.channelId) return view.channelId;
@@ -206,6 +237,7 @@ function showPopover(type, anchor, extra = {}) {
 
 /* ======================= ПРИГЛАШЕНИЯ ======================= */
 function createInvite(serverId, rawCode, custom) {
+  if (!sessionIsValid()) { showAuth(null, false); throw new Error('Сначала войдите в аккаунт'); }
   const code = custom ? slugify(rawCode) : makeCode(8);
   if (!code || code.length < 2) throw new Error('Адрес должен быть от 2 символов (латиница, цифры, - или _)');
   if (store.state.invites[code]) throw new Error('Адрес dogapp.gg/' + code + ' уже занят');
@@ -234,13 +266,18 @@ function revokeInvite(code) {
 function joinServerDirect(serverId) {
   const srv = store.state.servers[serverId];
   if (!srv) return;
-  ensureGuestSession();
+  if (!sessionIsValid()) { showAuth(); toast('Сначала зарегистрируйтесь или войдите в аккаунт', 'warn'); return; }
   if (srv.members?.[store.uid]) { selectServer(serverId); return; }
   store.set(['servers', serverId, 'members', store.uid], { role: 'member', joinedAt: Date.now() });
   selectServer(serverId);
   toast('Вы на сервере «' + clamp(srv.name, 30) + '»', 'ok');
 }
 function joinInvite(code) {
+  if (!sessionIsValid()) {
+    showAuth(code, false);
+    toast('Сначала зарегистрируйтесь или войдите, затем приглашение откроется снова', 'warn');
+    return;
+  }
   const inv = store.state.invites[code];
   if (!inv) { toast('Приглашение не найдено', 'error'); return; }
   const srv = store.state.servers[inv.serverId];
@@ -253,6 +290,7 @@ function joinInvite(code) {
 
 /* ======================= ДЕЙСТВИЯ С ДАННЫМИ ======================= */
 function sendMessage() {
+  if (!sessionIsValid()) { showAuth(); return; }
   const key = currentKey();
   if (!key) return;
   const text = (view.drafts[key] || '').trim();
@@ -276,6 +314,7 @@ function sendMessage() {
   $('composer')?.querySelector('textarea')?.focus();
 }
 function toggleReaction(id, emoji) {
+  if (!sessionIsValid()) { showAuth(); return; }
   const key = currentKey();
   const m = store.state.messages[key]?.[id];
   if (!m) return;
@@ -286,6 +325,7 @@ function toggleReaction(id, emoji) {
   else store.del(['messages', key, id, 'reactions', emoji]);
 }
 function insertText(token) {
+  if (!sessionIsValid()) { showAuth(); return; }
   const key = currentKey();
   if (!key) return;
   const cur = view.drafts[key] || '';
@@ -299,9 +339,9 @@ function insertText(token) {
 let lastTyping = 0, clearTypingTimer = null;
 function noteTyping() {
   const key = currentKey();
-  if (!key || Date.now() - lastTyping < 900) return;
+  if (!sessionIsValid() || !key || Date.now() - lastTyping < 900) return;
   lastTyping = Date.now();
-  store.set(['typing', key, store.uid], { name: store.me().name || 'Участник', at: Date.now() }, true);
+  store.set(['typing', key, store.uid], { name: accountName(store.me()), at: Date.now() }, true);
   clearTimeout(clearTypingTimer);
   clearTypingTimer = setTimeout(() => store.del(['typing', key, store.uid], true), 4000);
 }
@@ -324,7 +364,7 @@ async function resolveAvatar(form) {
   const fd = new FormData(form);
   const text = String(fd.get('icon') || '').trim().slice(0, 3).toUpperCase();
   if (url) return { avatar: { type: 'url', value: url }, avatarAnimated: animated };
-  return { avatar: { type: 'text', value: text || initials(String(fd.get('name') || 'Гость')), color: '#5865f2' }, avatarAnimated: animated };
+  return { avatar: { type: 'text', value: text || initials(String(fd.get('name') || getSession()?.login || '?')), color: '#5865f2' }, avatarAnimated: animated };
 }
 async function resolveBanner(form) {
   const { url, animated } = await loadPhoto(form, 'bannerFile', 'bannerUrl', 'bannerAnimated', 500);
@@ -333,6 +373,7 @@ async function resolveBanner(form) {
 }
 
 async function createServer(form) {
+  if (!sessionIsValid()) { showAuth(); throw new Error('Сначала войдите в аккаунт'); }
   const fd = new FormData(form);
   const v = k => String(fd.get(k) || '').trim();
   const name = v('name');
@@ -353,13 +394,13 @@ async function createServer(form) {
       [cidVoice]: { id: cidVoice, name: 'Общий голос', type: 'voice', topic: '', category: 'ГОЛОСОВЫЕ КАНАЛЫ', order: 2 }
     },
     members: { [store.uid]: { role: 'owner', joinedAt: now } },
-    emojis: emoteSet(DEFAULT_EMOTES.slice(0, 8), now, store.me().name || 'Владелец')
+    emojis: emoteSet(DEFAULT_EMOTES.slice(0, 8), now, accountName(store.me()))
   };
   store.set(['servers', sid], srv);
   const greetingId = rid('m');
   store.set(['messages', cidGeneral, greetingId], {
-    id: greetingId, authorId: 'u_bot', createdAt: now, reactions: {},
-    content: `**Сервер «${name}» создан.** :party:\nПриглашайте друзей: кастомная ссылка не истекает, а обычная живёт **3 дня**. Настройте баннер, фото и эмоции сервера.`
+    id: greetingId, authorId: store.uid, createdAt: now, reactions: {},
+    content: `**Сервер «${name}» создан.**\nПриглашайте людей: кастомная ссылка не истекает, а обычная живёт **3 дня**. Настройте баннер, фото и эмоции сервера.`
   });
   let code;
   try { code = createInvite(sid, vanityRaw || makeCode(8), !!vanityRaw); }
@@ -373,6 +414,7 @@ async function createServer(form) {
 }
 
 function addChannel(fd) {
+  if (!sessionIsValid()) { showAuth(); throw new Error('Сначала войдите в аккаунт'); }
   const srv = store.state.servers[view.serverId];
   if (!srv) throw new Error('Сначала откройте сервер');
   const v = k => String(fd.get(k) || '').trim();
@@ -391,6 +433,7 @@ function addChannel(fd) {
 }
 
 async function addEmoji(form) {
+  if (!sessionIsValid()) { showAuth(); throw new Error('Сначала войдите в аккаунт'); }
   const srv = store.state.servers[view.serverId];
   if (!srv) throw new Error('Откройте сервер');
   const fd = new FormData(form);
@@ -417,12 +460,13 @@ async function addEmoji(form) {
 }
 
 function startDm(uid) {
+  if (!sessionIsValid()) { showAuth(); return; }
   const u = store.state.users[uid];
-  if (!u) return;
+  if (!isRealAccount(u, store.state.accounts)) { toast('Можно написать только зарегистрированному аккаунту', 'error'); return; }
   let dm = Object.values(store.state.dms || {}).find(d => (d.users || []).includes(uid) && (d.users || []).includes(store.uid));
   if (!dm) {
     const id = rid('dm');
-    dm = { id, users: [store.uid, uid], name: u.name, avatar: u.avatar, createdAt: Date.now() };
+    dm = { id, users: [store.uid, uid], name: accountName(u), avatar: u.avatar, createdAt: Date.now() };
     store.set(['dms', id], dm);
   }
   closeModal();
@@ -447,14 +491,19 @@ function setupEvents() {
     switch (a) {
       /* --- аккаунт --- */
       case 'auth-tab': view.authMode = t.dataset.tab; view.authError = ''; refreshAuth(); break;
-      case 'auth-guest': ensureGuestSession(); startApp(); toast('Гостевой режим: данные хранятся в этом браузере'); break;
-      case 'auth-open': view.modal = null; view.authScreen = true; view.authError = ''; refreshAuth(); render(store, view); break;
+      case 'auth-open': showAuth(null, false); break;
       case 'auth-logout': {
-        view.authScreen = true; view.modal = null;
-        view.authMode = 'login'; view.authError = '';
+        if (callManager?.callId) callManager.endCall();
+        clearHash();
         logout();
+        setAuthScreen(null);
         refreshAuth(); render(store, view); refreshOverlays();
         toast('Вы вышли из аккаунта');
+        break;
+      }
+      case 'delete-account': {
+        if (!sessionIsValid()) { showAuth(); break; }
+        openModal('delete-account');
         break;
       }
 
@@ -565,9 +614,20 @@ function setupEvents() {
         break;
       }
       case 'revoke-invite': revokeInvite(code); refreshOverlays(); break;
-      case 'open-invite': location.hash = '#/i/' + encodeURIComponent(code); if (parseHash() === code) { view.invitePage = code; render(store, view); } break;
+      case 'open-invite': {
+        location.hash = '#/i/' + encodeURIComponent(code);
+        if (!sessionIsValid()) { showAuth(code, false); toast('Сначала зарегистрируйтесь или войдите', 'warn'); break; }
+        if (parseHash() === code) { view.invitePage = code; render(store, view); }
+        break;
+      }
       case 'join-invite': joinInvite(code); break;
-      case 'go-app': clearHash(); if (!getSession()) { view.authScreen = true; refreshAuth(); } render(store, view); refreshOverlays(); break;
+      case 'go-app': {
+        const pending = view.pendingInvite;
+        clearHash();
+        if (!sessionIsValid()) showAuth(pending, false);
+        else { render(store, view); refreshOverlays(); }
+        break;
+      }
       case 'join-server': joinServerDirect(id); closeModal(); break;
       case 'start-dm': startDm(uid); break;
 
@@ -586,13 +646,11 @@ function setupEvents() {
 
       /* --- звонки и голосовые каналы --- */
       case 'call-user': callManager.startCall(uid, t.dataset.type || 'voice'); break;
-      case 'demo-call': callManager.startDemo(t.dataset.type || 'video'); break;
       case 'call-accept': callManager.acceptCall(id); break;
       case 'call-decline': callManager.declineCall(id); break;
       case 'call-end': callManager.endCall(id); break;
       case 'call-mute': callManager.toggleMute(); break;
       case 'call-camera': callManager.toggleCamera(); break;
-      case 'call-demo-note': toast('Демо-звонок: удалённое видео создаётся локально через canvas.captureStream()'); break;
       case 'voice-leave': callManager.leaveVoice(); render(store, view); break;
       case 'voice-mute': callManager.toggleVoiceMute(); render(store, view); break;
 
@@ -626,7 +684,7 @@ function setupEvents() {
       }
       case 'recheck': {
         toast('Проверяем соединение…');
-        try { const m = await store.recheck(); toast(m === 'firebase' ? 'Firebase подключён' : 'Firebase недоступен — демо-режим', m === 'firebase' ? 'ok' : 'warn'); }
+        try { const m = await store.recheck(); toast(m === 'firebase' ? 'Firebase подключён' : 'Нет связи с Firebase — локальный режим', m === 'firebase' ? 'ok' : 'warn'); }
         catch (err) { toast(err.message, 'error'); }
         refreshOverlays(); render(store, view);
         break;
@@ -640,7 +698,6 @@ function setupEvents() {
         if (n) insertText(':' + n + ':'); else toast('Добавьте эмоции в настройках сервера', 'warn');
         break;
       }
-      case 'todo': toast('dogapp: баннеры, эмоции, друзья и звонки уже работают.'); break;
       default: break;
     }
   });
@@ -665,8 +722,23 @@ function setupEvents() {
         } else if (kind === 'auth-password') {
           await changePassword(v('old'), v('new'));
           form.reset(); toast('Пароль изменён', 'ok');
+        } else if (kind === 'auth-delete') {
+          const loginName = await deleteAccount({ password: v('password'), confirm: v('confirm') });
+          if (callManager) callManager.destroy();
+          view.modal = null; view.popover = null; view.picker = null;
+          view.drafts = {}; view.replyTo = null; view.editing = null; view.pendingAttachment = null;
+          view.voiceChannelId = null; view.invitePage = null;
+          clearHash();
+          setAuthScreen(null);
+          callManager = new CallManager(store, view);
+          refreshAuth(); render(store, view); refreshOverlays();
+          toast('Аккаунт @' + loginName + ' удалён вместе с данными', 'ok');
         }
-      } catch (err) { view.authError = err.message; refreshAuth(); }
+      } catch (err) {
+        if (kind === 'auth-login' || kind === 'auth-register') {
+          view.authError = err.message; refreshAuth();
+        } else toast(err.message, 'error');
+      }
       return;
     }
 
@@ -714,7 +786,7 @@ function setupEvents() {
           const bn = await resolveBanner(form);
           const font = FONT_CHOICES.some(f => f.id === v('font')) ? v('font') : 'default';
           store.patch(['users', store.uid], {
-            name: v('name') || 'Гость',
+            name: v('name') || getSession()?.login || 'Аккаунт',
             tag: (v('tag').replace(/\D/g, '') || '0001').slice(0, 4).padEnd(4, '0'),
             status: v('status'), bio: v('bio'), font,
             avatar: av.avatar, avatarAnimated: av.avatarAnimated,
@@ -726,7 +798,7 @@ function setupEvents() {
         }
         case 'fb': {
           toast('Подключаемся к ' + v('url') + '…');
-          try { const m = await store.recheck(v('url')); toast(m === 'firebase' ? 'Firebase подключён' : 'Не удалось подключиться — демо-режим', m === 'firebase' ? 'ok' : 'warn'); }
+          try { const m = await store.recheck(v('url')); toast(m === 'firebase' ? 'Firebase подключён' : 'Не удалось подключиться — локальный режим', m === 'firebase' ? 'ok' : 'warn'); }
           catch (err) { toast(err.message, 'error'); }
           refreshOverlays(); render(store, view);
           break;
@@ -743,6 +815,7 @@ function setupEvents() {
           if (!c) throw new Error('Введите код приглашения');
           closeModal();
           location.hash = '#/i/' + encodeURIComponent(c);
+          if (!sessionIsValid()) { showAuth(c, false); toast('Сначала зарегистрируйтесь или войдите', 'warn'); break; }
           view.invitePage = c; render(store, view);
           break;
         }
@@ -820,9 +893,12 @@ function setupEvents() {
   });
 
   window.addEventListener('hashchange', () => {
-    view.invitePage = parseHash();
-    if (!view.invitePage) { view.modal = null; view.popover = null; view.picker = null; }
-    render(store, view); refreshOverlays();
+    const code = parseHash();
+    if (!sessionIsValid()) { showAuth(code, false); return; }
+    view.authScreen = false;
+    view.invitePage = code;
+    if (!code) { view.modal = null; view.popover = null; view.picker = null; }
+    refreshAuth(); render(store, view); refreshOverlays();
   });
   window.addEventListener('resize', () => { if (view.picker) closePicker(); });
 }

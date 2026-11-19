@@ -1,14 +1,14 @@
 // dogapp — рендер интерфейса (Discord-like)
 import {
   esc, clamp, safeUrl, safeColor, bannerCss, avatarHtml, serverIconHtml, nickStyle,
-  fmtTime, fmtFull, fmtDate, relTime, timeLeft, isExpired, plural, inviteUrl
+  fmtTime, fmtFull, fmtDate, relTime, timeLeft, isExpired, plural, inviteUrl,
+  isRealAccount, accountName
 } from './util.js';
 import { icon } from './icons.js';
 import { buildEmoteIndex } from './emojis.js';
 import { invitePageHtml } from './modals.js';
 import { friendsViewHtml, friendIds, requestsIn } from './friends.js';
 import { callHeaderButtons } from './calls.js';
-import { isGuest } from './auth.js';
 
 const $ = id => document.getElementById(id);
 
@@ -25,6 +25,7 @@ function context(store, view) {
 function isOnline(u, me, id) {
   return id === me || ((u?.lastSeen || 0) > Date.now() - 120000);
 }
+function realUser(s, id) { return isRealAccount(s.users?.[id], s.accounts); }
 function roleColor(u, srv, id) {
   const role = srv?.members?.[id]?.role;
   if (role === 'owner') return '#f0b232';
@@ -112,6 +113,7 @@ function findReply(s, id) {
 }
 
 function messageHtml(m, u, srv, grouped, emoteIdx, s, me) {
+  u = u || {};
   const color = roleColor(u, srv, m.authorId);
   const mine = m.authorId === me;
   const reply = m.replyTo && findReply(s, m.replyTo);
@@ -120,11 +122,11 @@ function messageHtml(m, u, srv, grouped, emoteIdx, s, me) {
     <div class="msg-gutter">${grouped ? `<span class="msg-hover-time">${esc(fmtTime(m.createdAt))}</span>` : avatarHtml(u, 'avatar-md')}</div>
     <div class="msg-main">
       ${grouped ? '' : `<div class="msg-head">
-        <button class="msg-author" style="color:${esc(color)};${nickStyle(u)}" data-action="profile" data-uid="${esc(m.authorId)}">${esc(clamp(u.name || 'Участник', 32))}</button>
+        <button class="msg-author" style="color:${esc(color)};${nickStyle(u)}" data-action="profile" data-uid="${esc(m.authorId)}">${esc(clamp(accountName(u), 32))}</button>
         ${u.bot ? '<span class="bot-tag">BOT</span>' : ''}
         <span class="msg-time">${esc(fmtFull(m.createdAt))}</span>
       </div>`}
-      ${reply ? `<div class="reply-line">${icon('reply', 13)}<b>${esc(clamp((s.users[reply.authorId] || {}).name || 'Участник', 24))}</b><span>${esc(clamp(reply.content || '', 90))}</span></div>` : ''}
+      ${reply ? `<div class="reply-line">${icon('reply', 13)}<b>${esc(clamp(accountName(s.users[reply.authorId]), 24))}</b><span>${esc(clamp(reply.content || '', 90))}</span></div>` : ''}
       <div class="msg-text">${formatContent(m.content, emoteIdx)}${m.editedAt ? '<span class="edited">(изм.)</span>' : ''}</div>
       ${m.attachment && safeUrl(m.attachment.url) ? `<div class="msg-attachment"><img src="${esc(safeUrl(m.attachment.url))}" alt="${esc(m.attachment.name || 'вложение')}" loading="lazy"><small>${esc(clamp(m.attachment.name || 'изображение', 40))}</small></div>` : ''}
       ${inviteCards(m.content, s)}
@@ -199,7 +201,7 @@ export function render(store, view) {
 }
 
 function renderRail(store, view, c) {
-  const joined = store.myServers();
+  const joined = store.myServers().filter(sv => isRealAccount(c.s.users[sv.ownerId], c.s.accounts));
   $('rail-explore').innerHTML = icon('compass', 22);
   $('rail-link').innerHTML = icon('link', 20);
   $('rail-cloud').innerHTML = icon('cloud', 20);
@@ -271,9 +273,12 @@ function renderSidebar(store, view, c) {
     }
     ch.innerHTML = html;
   } else {
-    const dms = Object.values(s.dms || {}).filter(d => (d.users || []).includes(me));
+    const dms = Object.values(s.dms || {}).filter(d => {
+      const users = Array.isArray(d.users) ? d.users : [];
+      return users.includes(me) && users.every(id => realUser(s, id));
+    });
     const q = String(view.dmQuery || '').toLowerCase();
-    const shown = dms.filter(d => !q || d.name.toLowerCase().includes(q));
+    const shown = dms.filter(d => !q || String(d.name || '').toLowerCase().includes(q));
     const inc = requestsIn(s, me).length;
     ch.innerHTML = `
       <button class="home-nav ${view.section === 'home' ? 'active' : ''}" data-action="home-tab" data-tab="friends">${icon('users', 20)}<span>Друзья</span>${inc ? `<span class="nav-badge">${inc}</span>` : ''}</button>
@@ -281,10 +286,10 @@ function renderSidebar(store, view, c) {
       <div class="chan-label home-label"><span>ЛИЧНЫЕ СООБЩЕНИЯ</span><button class="chan-label-plus" data-action="new-dm" data-tip="Новое ЛС">${icon('plus', 14)}</button></div>
       ${shown.map(d => {
         const other = (d.users || []).find(id => id !== me);
-        const u = s.users[other] || {};
+        const u = s.users[other];
         return `<div class="chan dm ${view.section === 'dm' && view.dmId === d.id ? 'active' : ''}" data-action="select-dm" data-id="${esc(d.id)}">
           <span class="avatar-wrap">${avatarHtml(u, 'avatar-sm')}<i class="pres ${isOnline(u, me, other) ? 'online' : 'offline'}"></i></span>
-          <span>${esc(clamp(d.name, 26))}</span>
+          <span>${esc(clamp(accountName(u), 26))}</span>
         </div>`;
       }).join('') || '<div class="chan-empty">Бесед не найдено</div>'}`;
   }
@@ -309,8 +314,6 @@ function renderHeader(store, view, c) {
     </div>
     <div class="hdr-tools">
       ${callHeaderButtons(store, view)}
-      <button class="hdr-btn" data-action="todo" data-tip="Уведомления">${icon('bell', 20)}</button>
-      <button class="hdr-btn" data-action="todo" data-tip="Закреплённые">${icon('pin', 20)}</button>
       <button class="hdr-btn ${view.showMembers ? 'active' : ''}" data-action="toggle-members" data-tip="Список участников">${icon('users', 20)}</button>
       <div class="hdr-search"><input data-role="search" value="${esc(view.search || '')}" placeholder="Поиск по сообщениям">${icon('search', 15)}</div>
       <button class="hdr-btn" data-action="about" data-tip="Помощь">${icon('help', 20)}</button>
@@ -325,7 +328,9 @@ function renderMessages(store, view, c) {
 
   if (!key) { el.innerHTML = friendsViewHtml(store, view); return; }
 
-  const all = Object.values(s.messages[key] || {}).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  const all = Object.values(s.messages[key] || {})
+    .filter(m => m && realUser(s, m.authorId))
+    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   const q = String(view.search || '').toLowerCase().trim();
   const list = q ? all.filter(m => String(m.content || '').toLowerCase().includes(q)) : all;
 
@@ -340,14 +345,16 @@ function renderMessages(store, view, c) {
       </div>`;
     } else if (dm) {
       const other = (dm.users || []).find(id => id !== me);
-      const u = s.users[other] || {};
-      intro = `<div class="chan-intro dm-intro">${avatarHtml(u, 'avatar-xl')}<h1 style="${nickStyle(u)}">${esc(clamp(dm.name, 40))}</h1><p>Это начало вашей беседы с <b>${esc(clamp(dm.name, 40))}</b>. Эмоции серверов работают и здесь — бесплатно.</p></div>`;
+      const u = s.users[other];
+      if (realUser(s, other)) {
+        intro = `<div class="chan-intro dm-intro">${avatarHtml(u, 'avatar-xl')}<h1 style="${nickStyle(u)}">${esc(clamp(accountName(u), 40))}</h1><p>Это начало вашей беседы с <b>${esc(clamp(accountName(u), 40))}</b>. Эмоции серверов работают и здесь — бесплатно.</p></div>`;
+      }
     }
   }
 
   let body = '', lastAuthor = null, lastTime = 0;
   for (const m of list) {
-    const u = s.users[m.authorId] || { name: 'Участник' };
+    const u = s.users[m.authorId];
     const grouped = m.authorId === lastAuthor && (m.createdAt - lastTime) < 7 * 60000;
     body += messageHtml(m, u, srv, grouped, emoteIdx, s, me);
     lastAuthor = m.authorId; lastTime = m.createdAt;
@@ -367,20 +374,21 @@ function renderMembers(store, view, c) {
 
   if (dm) {
     const other = (dm.users || []).find(id => id !== me);
-    const u = s.users[other] || {};
+    const u = s.users[other];
+    if (!realUser(s, other)) { el.innerHTML = '<div class="empty">Аккаунт собеседника удалён</div>'; return; }
     el.innerHTML = `<div class="member-group-title">УЧАСТНИКИ — 2</div>
-      <div class="member-row" data-action="profile" data-uid="${esc(other)}">${avatarHtml(u)}<b style="${nickStyle(u)}">${esc(clamp(u.name || 'Участник', 24))}</b></div>
+      <div class="member-row" data-action="profile" data-uid="${esc(other)}">${avatarHtml(u)}<b style="${nickStyle(u)}">${esc(clamp(accountName(u), 24))}</b></div>
       <div class="member-promo">${icon('sparkle', 18)}<b>Бесплатные эмоции</b><span>Эмоции всех серверов доступны даже в ЛС — без подписки.</span><button class="btn-outline" data-action="emoji-picker" data-mode="composer">Открыть эмоции</button></div>`;
     return;
   }
-  const ids = Object.keys(srv?.members || {});
+  const ids = Object.keys(srv?.members || {}).filter(id => realUser(s, id));
   const online = ids.filter(id => isOnline(s.users[id], me, id));
   const offline = ids.filter(id => !online.includes(id));
   const row = id => {
-    const u = s.users[id] || { name: 'Участник' };
+    const u = s.users[id];
     return `<div class="member-row" data-action="profile" data-uid="${esc(id)}">
       <span class="avatar-wrap">${avatarHtml(u)}<i class="pres ${isOnline(u, me, id) ? 'online' : 'offline'}"></i></span>
-      <div><b style="color:${esc(roleColor(u, srv, id))};${nickStyle(u)}">${esc(clamp(u.name, 24))}</b>${u.status ? `<small>${esc(clamp(u.status, 34))}</small>` : ''}</div>
+      <div><b style="color:${esc(roleColor(u, srv, id))};${nickStyle(u)}">${esc(clamp(accountName(u), 24))}</b>${u.status ? `<small>${esc(clamp(u.status, 34))}</small>` : ''}</div>
       ${srv.members[id].role === 'owner' ? icon('crown', 15) : ''}
     </div>`;
   };
@@ -396,9 +404,9 @@ function renderComposer(store, view, c) {
   el.hidden = false;
   const draft = view.drafts[key] || '';
   const replyMsg = view.replyTo ? findReply(c.s, view.replyTo) : null;
-  const replyUser = replyMsg ? (c.s.users[replyMsg.authorId] || {}) : {};
+  const replyUser = replyMsg ? c.s.users[replyMsg.authorId] : null;
   el.innerHTML = `
-    ${view.replyTo ? `<div class="composer-banner">${icon('reply', 16)} Ответ для <b>${esc(clamp(replyUser.name || 'Участник', 28))}</b><span data-action="cancel-reply" class="banner-x">${icon('close', 16)}</span></div>` : ''}
+    ${view.replyTo ? `<div class="composer-banner">${icon('reply', 16)} Ответ для <b>${esc(clamp(accountName(replyUser), 28))}</b><span data-action="cancel-reply" class="banner-x">${icon('close', 16)}</span></div>` : ''}
     ${view.editing ? `<div class="composer-banner editing">${icon('edit', 16)} Редактирование сообщения<span data-action="cancel-edit" class="banner-x">${icon('close', 16)}</span></div>` : ''}
     ${view.pendingAttachment ? `<div class="composer-banner attach">${icon('image', 16)} <img src="${esc(safeUrl(view.pendingAttachment.url))}" alt=""> ${esc(clamp(view.pendingAttachment.name, 36))}<span data-action="cancel-attach" class="banner-x">${icon('close', 16)}</span></div>` : ''}
     <div class="composer ${view.editing ? 'is-editing' : ''}">
@@ -420,8 +428,8 @@ function renderTyping(store, view, c) {
   const el = $('typing');
   const t = c.key ? (c.s.typing[c.key] || {}) : {};
   const names = Object.entries(t)
-    .filter(([id, v]) => id !== store.uid && v && (v.at || 0) > Date.now() - 5000)
-    .map(([, v]) => v.name);
+    .filter(([id, v]) => id !== store.uid && realUser(c.s, id) && v && (v.at || 0) > Date.now() - 5000)
+    .map(([id]) => accountName(c.s.users[id]));
   el.innerHTML = names.length
     ? `<span class="typing-dots"><i></i><i></i><i></i></span><b>${esc(names.slice(0, 3).join(', '))}</b> ${names.length > 1 ? 'печатают' : 'печатает'}…`
     : '';
@@ -433,11 +441,13 @@ function renderUserPanel(store, view, c) {
   $('user-panel').innerHTML = `
     <button class="up-user" data-action="profile" data-uid="${esc(store.uid)}" data-tip="Мой профиль">
       <span class="avatar-wrap">${avatarHtml(u, 'avatar-sm')}<i class="pres ${online ? 'online' : 'idle'}"></i></span>
-      <span class="up-name"><b style="${nickStyle(u)}">${esc(clamp(u.name || 'Гость', 20))}</b><small>${isGuest() ? 'гостевой вход' : esc(clamp(u.status || '@' + (u.login || ''), 30))}</small></span>
+      <span class="up-name"><b style="${nickStyle(u)}">${esc(clamp(accountName(u), 20))}</b><small>${esc(clamp(u.status || '@' + (u.login || ''), 30))}</small></span>
     </button>
     <div class="up-actions">
       <button data-action="toggle-mic" data-tip="${view.mic ? 'Выключить микрофон' : 'Включить микрофон'}">${icon(view.mic ? 'mic' : 'micOff', 19)}</button>
       <button data-action="toggle-deaf" data-tip="${view.deaf ? 'Включить звук' : 'Выключить звук'}">${icon(view.deaf ? 'headOff' : 'headphones', 19)}</button>
       <button data-action="settings" data-tip="Настройки пользователя">${icon('settings', 19)}</button>
+      <button class="up-logout" data-action="auth-logout" data-tip="Выйти из аккаунта">${icon('arrowLeft', 19)}</button>
+      <button class="up-delete" data-action="delete-account" data-tip="Удалить аккаунт">${icon('trash', 19)}</button>
     </div>`;
 }
