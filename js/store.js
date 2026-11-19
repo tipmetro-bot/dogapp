@@ -1,5 +1,5 @@
 // dogapp — хранилище: Firebase Realtime Database (REST) + локальный демо-фолбэк
-import { FB_DEFAULT, rid } from './util.js';
+import { FB_DEFAULT, rid, BANNER_PRESETS, initials } from './util.js';
 import { buildSeed } from './seed.js';
 
 const LS_UID  = 'dogapp_uid_v1';
@@ -19,7 +19,9 @@ function normalize(raw) {
   const d = obj(raw);
   return {
     meta: obj(d.meta), users: obj(d.users), servers: obj(d.servers),
-    messages: obj(d.messages), dms: obj(d.dms), invites: obj(d.invites), typing: obj(d.typing)
+    messages: obj(d.messages), dms: obj(d.dms), invites: obj(d.invites), typing: obj(d.typing),
+    accounts: obj(d.accounts), friends: obj(d.friends), friendRequests: obj(d.friendRequests),
+    calls: obj(d.calls), voice: obj(d.voice), blocks: obj(d.blocks)
   };
 }
 function setIn(root, path, value) {
@@ -50,7 +52,7 @@ export class Store {
     this.root = this.url + '/dogapp';
     this.uid = this._uid();
     this.state = null;
-    this.mode = 'loading';        // 'firebase' | 'local'
+    this.mode = 'loading';
     this.error = '';
     this.writeError = '';
     this.listeners = [];
@@ -71,6 +73,13 @@ export class Store {
     return u;
   }
 
+  // Переключение личности после входа/регистрации
+  setUid(uid) {
+    if (!uid || /[^a-zA-Z0-9_-]/.test(String(uid))) return;
+    this.uid = String(uid);
+    localStorage.setItem(LS_UID, this.uid);
+  }
+
   _url(path) {
     const seg = String(path || '').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean)
       .map(encodeURIComponent).join('/');
@@ -88,24 +97,18 @@ export class Store {
   async init() {
     const cached = readJSON(LS_DATA);
     let remote = null, reachable = false;
-    try {
-      remote = await this._read('');
-      reachable = true;
-    } catch (e) {
-      this.error = e.message || 'сеть недоступна';
-    }
+    try { remote = await this._read(''); reachable = true; }
+    catch (e) { this.error = e.message || 'сеть недоступна'; }
 
     if (reachable) {
       this.mode = 'firebase';
       if (remote && Object.keys(obj(remote)).length) {
         this.state = normalize(remote);
       } else {
-        // Пустая база — заливаем стартовый набор один раз
         const seed = buildSeed(this.uid);
         this.state = normalize(seed);
-        try {
-          await this._request('', 'PUT', seed);
-        } catch (e) {
+        try { await this._request('', 'PUT', seed); }
+        catch (e) {
           this.mode = 'local';
           this.error = 'База доступна только на чтение: ' + (e.message || 'запись запрещена');
         }
@@ -153,12 +156,18 @@ export class Store {
     const u = this.state.users[this.uid];
     if (!u) {
       this.state.users[this.uid] = {
-        id: this.uid, name: 'Пёс', tag: '0001', avatar: { type: 'emoji', value: '🐕' },
-        banner: 'linear-gradient(135deg,#5865f2 0%,#eb459e 100%)',
-        bio: 'Общаюсь бесплатно 🐾', status: '', color: '#ffffff', lastSeen: Date.now(), createdAt: Date.now()
+        id: this.uid, name: 'Гость', tag: '0001', login: '',
+        avatar: { type: 'text', value: initials('Гость'), color: '#5865f2' }, avatarAnimated: false,
+        banner: BANNER_PRESETS[0].value, bannerAnimated: false,
+        bio: '', status: '', font: 'default', color: '#ffffff',
+        lastSeen: Date.now(), createdAt: Date.now()
       };
     } else {
       u.lastSeen = Date.now();
+      if (!u.font) u.font = 'default';
+      if (typeof u.bannerAnimated !== 'boolean') u.bannerAnimated = false;
+      if (typeof u.avatarAnimated !== 'boolean') u.avatarAnimated = false;
+      if (u.avatar && u.avatar.type === 'emoji') u.avatar = { type: 'text', value: initials(u.name), color: '#5865f2' };
     }
   }
 
@@ -178,10 +187,8 @@ export class Store {
       window.addEventListener('online', () => this.sync());
       window.addEventListener('storage', e => {
         if (this.mode === 'local' && e.key === LS_DATA && e.newValue) {
-          try {
-            this.state = normalize(JSON.parse(e.newValue));
-            this.emit();
-          } catch (_) { /* битый кэш */ }
+          try { this.state = normalize(JSON.parse(e.newValue)); this.emit(); }
+          catch (_) { /* битый кэш */ }
         }
       });
     }
@@ -205,9 +212,7 @@ export class Store {
         this.saveCache();
         this.emit();
       }
-    } catch (e) {
-      this.error = e.message || 'нет связи с Firebase';
-    }
+    } catch (e) { this.error = e.message || 'нет связи с Firebase'; }
   }
 
   async recheck(url) {
@@ -216,8 +221,7 @@ export class Store {
       if (!/^https:\/\/[a-z0-9.-]+\.firebaseio\.com$/i.test(clean) && !/^https:\/\/[a-z0-9.-]+\.firebasedatabase\.app$/i.test(clean)) {
         throw new Error('Нужен адрес вида https://PROJECT-default-rtdb.firebaseio.com');
       }
-      this.url = clean;
-      this.root = clean + '/dogapp';
+      this.url = clean; this.root = clean + '/dogapp';
       localStorage.setItem(LS_FB, clean);
     }
     clearInterval(this.pollTimer); clearInterval(this.beatTimer);
@@ -251,20 +255,16 @@ export class Store {
     }
   }
 
-  // silent=true обновляет данные и Firebase, но не перерисовывает UI
-  // (нужно для индикатора «печатает», чтобы не дёргать поле ввода)
   set(path, value, silent = false) {
     setIn(this.state, path, value);
     this.bump(silent);
     this._write(path, 'PUT', value);
   }
-
   del(path, silent = false) {
     delIn(this.state, path);
     this.bump(silent);
     this._write(path, 'DELETE');
   }
-
   patch(path, patch, silent = false) {
     patchIn(this.state, path, patch);
     this.bump(silent);

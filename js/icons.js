@@ -44,7 +44,16 @@ const P = {
   info:        '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
   plusCircle:  '<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>',
   arrowLeft:   '<path d="M19 12H5M11 6l-6 6 6 6"/>',
-  bolt:        '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>'
+  bolt:        '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+  video:       '<rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 6-3v10l-6-3z"/>',
+  videoOff:    '<path d="M3 3l18 18"/><path d="M16 10l6-3v10l-3-1.5M14 8V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
+  phone:       '<path d="M5 3h4l2 5-2.5 1.5a12 12 0 0 0 6 6L16 13l5 2v4a2 2 0 0 1-2 2A17 17 0 0 1 3 5a2 2 0 0 1 2-2z"/>',
+  phoneOff:    '<path d="M3 3l18 18"/><path d="M5 3h4l2 5-2.3 1.4M16 13l5 2v4a2 2 0 0 1-2 2 17 17 0 0 1-8-2"/>',
+  userPlus:    '<circle cx="9" cy="8" r="3.5"/><path d="M2 20v-1.5a4 4 0 0 1 4-4h6a4 4 0 0 1 4 4V20M19 8v6M16 11h6"/>',
+  screen:      '<rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3"/>',
+  expand:      '<path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/>',
+  signal:      '<path d="M4 20v-4M9 20v-8M14 20V8M19 20V4"/>',
+  grid:        '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>'
 };
 
 export function icon(name, size = 20, cls = '') {
