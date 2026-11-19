@@ -3,6 +3,23 @@ export const FB_DEFAULT = 'https://dogapp-52b84-default-rtdb.firebaseio.com';
 export const INVITE_TTL = 3 * 24 * 60 * 60 * 1000; // 3 дня для обычных ссылок
 export const APP_NAME = 'dogapp';
 
+// Идентификаторы, которые раньше создавались стартовыми данными.
+// После очистки в базе остаются только профили зарегистрированных аккаунтов.
+export const DEMO_USER_IDS = Object.freeze([
+  'u_bot', 'u_luna', 'u_barsik', 'u_koder', 'u_mila', 'u_rex', 'demo'
+]);
+
+export function isRealAccount(user, accounts = null) {
+  if (!user || typeof user !== 'object' || !user.id || !user.login) return false;
+  if (user.bot || user.demo || user.guest || DEMO_USER_IDS.includes(user.id)) return false;
+  if (accounts && !accounts[String(user.login).toLowerCase()]) return false;
+  return true;
+}
+
+export function accountName(user) {
+  return isRealAccount(user) ? String(user.name || user.login) : 'Удалённый аккаунт';
+}
+
 export const BANNER_PRESETS = [
   { name: 'Blurple', value: 'linear-gradient(135deg,#5865f2 0%,#eb459e 100%)' },
   { name: 'Лес',     value: 'linear-gradient(135deg,#23a55a 0%,#0e7a86 100%)' },
@@ -163,7 +180,7 @@ function glyphContent(a, fallback) {
 }
 export function avatarHtml(user, cls = '') {
   const a = (user && user.avatar) || null;
-  const name = (user && user.name) || 'Пёс';
+  const name = accountName(user);
   if (a && a.type === 'url' && safeUrl(a.value)) {
     return `<span class="avatar ${cls}"><img src="${esc(safeUrl(a.value))}" alt=""></span>`;
   }
@@ -213,7 +230,7 @@ export function isAnimatedImage(url) {
   return /^data:image\/(gif|webp|apng)/i.test(String(url || '')) || /\.(gif|webp|apng)(\?|$)/i.test(String(url || ''));
 }
 
-/* ---------- пароли (демо-уровень, без серверной проверки) ---------- */
+/* ---------- пароли: соль и SHA-256 в браузере ---------- */
 export function randomSalt() {
   return makeCode(16);
 }

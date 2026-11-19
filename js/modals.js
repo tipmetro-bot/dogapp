@@ -2,11 +2,11 @@
 import {
   BANNER_PRESETS, FONT_CHOICES, INVITE_TTL, esc, clamp, safeUrl, safeColor, bannerCss,
   avatarHtml, serverIconHtml, nickStyle, inviteUrl, isExpired, timeLeft, fmtFull, fmtDate,
-  plural, relTime, FB_DEFAULT
+  plural, relTime, FB_DEFAULT, accountName, isRealAccount
 } from './util.js';
 import { icon } from './icons.js';
 import { EMOJI_GROUPS, buildEmoteIndex } from './emojis.js';
-import { accountTabHtml } from './auth.js';
+import { accountTabHtml, getSession } from './auth.js';
 
 const TABS = {
   'server-settings': [
@@ -202,10 +202,12 @@ export function modalHtml(store, view) {
     }
 
     else if (tab === 'members') {
-      const list = Object.entries(srv?.members || {}).map(([id, m]) => ({ id, m, u: s.users[id] || {} }));
+      const list = Object.entries(srv?.members || {})
+        .filter(([id]) => isRealAccount(s.users[id], s.accounts))
+        .map(([id, m]) => ({ id, m, u: s.users[id] }));
       body = `<div class="member-admin-list">${list.map(({ id, m, u }) =>
-        `<div class="member-admin">${avatarHtml(u)}<div><b style="color:${safeColor(u.color, '#f2f3f5')};${nickStyle(u)}">${esc(clamp(u.name || 'Участник', 30))}</b><small>#${esc(u.tag || '0000')} · ${roleName(m.role)}</small></div>${m.role === 'owner' ? icon('crown', 18) : ''}</div>`
-      ).join('')}</div>`;
+        `<div class="member-admin">${avatarHtml(u)}<div><b style="color:${safeColor(u.color, '#f2f3f5')};${nickStyle(u)}">${esc(clamp(accountName(u), 30))}</b><small>#${esc(u.tag || '0000')} · ${roleName(m.role)}</small></div>${m.role === 'owner' ? icon('crown', 18) : ''}</div>`
+      ).join('') || '<div class="empty">Зарегистрированных участников нет</div>'}</div>`;
     }
 
     else if (tab === 'danger') {
@@ -219,14 +221,14 @@ export function modalHtml(store, view) {
 
   else if (t === 'user-settings') {
     title = 'Настройки пользователя';
-    sub = esc((user.name || 'Гость') + '#' + (user.tag || '0001'));
+    sub = esc(accountName(user) + '#' + (user.tag || '0001'));
     tabs = tabsHtml(t, view.modalTab);
     const tab = view.modalTab || 'profile';
 
     if (tab === 'profile') {
       body = `<div class="profile-preview" style="${esc(bannerCss(user.banner, user.bannerAnimated))}">
           <div class="profile-preview-avatar">${avatarHtml(user, 'avatar-lg')}</div>
-          <div class="profile-preview-name"><b data-role="profile-name" style="${nickStyle(user)}">${esc(clamp(user.name || 'Гость', 30))}</b><span>#${esc(user.tag || '0001')}</span>${icon('sparkle', 15)}</div>
+          <div class="profile-preview-name"><b data-role="profile-name" style="${nickStyle(user)}">${esc(clamp(accountName(user), 30))}</b><span>#${esc(user.tag || '0001')}</span>${icon('sparkle', 15)}</div>
         </div>
         <div class="free-badge">${icon('bolt', 16)} dogapp Free — баннеры, фото, эмоции и ссылки бесплатны</div>
         <form data-form="profile">
@@ -250,7 +252,7 @@ export function modalHtml(store, view) {
     else if (tab === 'connection') {
       const ok = store.mode === 'firebase';
       body = `<div class="conn-card ${ok ? 'conn-ok' : 'conn-bad'}">
-          <div class="conn-head">${icon(ok ? 'cloud' : 'info', 22)}<div><b>${ok ? 'Firebase подключён' : 'Демо-режим (localStorage)'}</b><span>${ok ? 'Данные синхронизируются между устройствами каждые 2 секунды' : 'Данные сохраняются только в этом браузере'}</span></div></div>
+          <div class="conn-head">${icon(ok ? 'cloud' : 'info', 22)}<div><b>${ok ? 'Firebase подключён' : 'Локальный режим (кэш браузера)'}</b><span>${ok ? 'Аккаунты, серверы и сообщения синхронизируются между устройствами каждые 2 секунды' : 'Нет связи с Firebase: изменения сохраняются только в этом браузере'}</span></div></div>
           <div class="conn-url">${esc(store.root)}.json</div>
         </div>
         ${store.error ? `<div class="conn-error">Ошибка чтения: ${esc(store.error)}</div>` : ''}
@@ -263,8 +265,8 @@ export function modalHtml(store, view) {
         </form>
         <button class="btn-outline full" data-action="recheck">${icon('bolt', 16)} Проверить соединение ещё раз</button>
         <div class="hr"></div>
-        <div class="section-title">Правила базы (для теста)</div>
-        <p class="hint">Чтобы чтение и запись работали без авторизации, в Firebase → Realtime Database → Rules разрешите узел <code>dogapp</code>:</p>
+        <div class="section-title">Правила базы</div>
+        <p class="hint">Чтобы чтение и запись работали без серверной авторизации, в Firebase → Realtime Database → Rules разрешите узел <code>dogapp</code>:</p>
         <pre class="code-block">{
   "rules": {
     "dogapp": {
@@ -273,16 +275,16 @@ export function modalHtml(store, view) {
     }
   }
 }</pre>
-        <p class="hint">Открытые правила подходят только для демо. Для реального проекта добавьте аутентификацию и проверки.</p>`;
+        <p class="hint">Для рабочего проекта с закрытыми данными добавьте Firebase Authentication и проверки <code>.validate</code>.</p>`;
     }
 
     else if (tab === 'about') {
-      body = `<div class="about-hero"><img src="assets/logo.svg" alt=""><div><b>dogapp</b><span>v2.0 · бесплатно · HTML/CSS/JS без сборки</span></div></div>
+      body = `<div class="about-hero"><img src="assets/logo.svg" alt=""><div><b>dogapp</b><span>v3.0 · бесплатно · HTML/CSS/JS без сборки · только реальные аккаунты</span></div></div>
         <div class="feature-grid">
           <div class="feature">${icon('image', 20)}<div><b>Фото и баннеры</b><span>Загрузка файла или ссылка, анимация включается и выключается.</span></div></div>
           <div class="feature">${icon('smile', 20)}<div><b>Эмоции серверов</b><span>Свои эмоции доступны всем, включая друзей, без подписки.</span></div></div>
           <div class="feature">${icon('users', 20)}<div><b>Друзья и аккаунты</b><span>Регистрация, заявки в друзья, поиск по логину.</span></div></div>
-          <div class="feature">${icon('video', 20)}<div><b>Звонки</b><span>Голосовые каналы, WebRTC-звонки через Firebase и демо видеозвонки.</span></div></div>
+          <div class="feature">${icon('video', 20)}<div><b>Звонки</b><span>Голосовые каналы и WebRTC-звонки через Firebase между зарегистрированными аккаунтами.</span></div></div>
           <div class="feature">${icon('edit', 20)}<div><b>Шрифт ника</b><span>Выберите начертание — его увидят все участники.</span></div></div>
           <div class="feature">${icon('link', 20)}<div><b>Ссылки</b><span>Вечная кастомная ссылка или обычная на 3 дня.</span></div></div>
         </div>
@@ -309,14 +311,17 @@ export function modalHtml(store, view) {
   else if (t === 'explore') {
     title = 'Найти серверы';
     sub = 'Все серверы в базе dogapp. Заходите по ссылке или в один клик.';
-    const all = Object.values(s.servers);
+    const all = Object.values(s.servers).filter(sv =>
+      !sv.demo && !sv.seeded && isRealAccount(s.users[sv.ownerId], s.accounts) &&
+      Object.keys(sv.members || {}).some(id => isRealAccount(s.users[id], s.accounts))
+    );
     body = `<form data-form="invite-code" class="code-form">
         ${input('У вас есть код приглашения?', 'code', '', { placeholder: 'dogapp или WELCOME7', max: 24, required: true })}
         <button class="btn-primary" type="submit">Открыть</button>
       </form>
       <div class="hr"></div>
       <div class="server-cards">${all.map(sv => {
-        const count = Object.keys(sv.members || {}).length;
+        const count = Object.keys(sv.members || {}).filter(id => isRealAccount(s.users[id], s.accounts)).length;
         const joined = !!(sv.members && sv.members[me]);
         const inv = s.invites[sv.vanity] || Object.values(s.invites).find(i => i.serverId === sv.id && !isExpired(i));
         return `<div class="server-card">
@@ -344,13 +349,25 @@ export function modalHtml(store, view) {
     </form>`;
   }
 
+  else if (t === 'delete-account') {
+    title = 'Удалить аккаунт';
+    sub = 'Действие необратимо. Данные удаляются из Firebase и локального кэша.';
+    const login = getSession()?.login || '';
+    body = `<div class="notice notice-red">${icon('trash', 20)}<div><b>Аккаунт @${esc(login)} будет удалён.</b><br>Исчезнут профиль, пароль, друзья, заявки, личные сообщения, звонки и ваши сообщения. Ваши серверы без других участников удалятся; серверы с участниками перейдут к другому владельцу.</div></div>
+      <form data-form="auth-delete">
+        <label class="field"><span>Пароль аккаунта</span><input name="password" type="password" autocomplete="current-password" required></label>
+        <label class="field"><span>Введите логин <b>${esc(login)}</b> для подтверждения</span><input name="confirm" maxlength="20" placeholder="${esc(login)}" required></label>
+        <div class="form-actions"><button class="btn-danger" type="submit">Удалить аккаунт навсегда</button></div>
+      </form>`;
+  }
+
   else if (t === 'new-dm') {
     title = 'Новое личное сообщение';
-    sub = 'Выберите, кому написать.';
-    const users = Object.values(s.users).filter(u => u.id !== me);
+    sub = 'Выберите зарегистрированного участника.';
+    const users = Object.values(s.users).filter(u => u.id !== me && isRealAccount(u, s.accounts));
     body = `<div class="dm-user-list">${users.map(u =>
-      `<button class="dm-user" data-action="start-dm" data-uid="${esc(u.id)}">${avatarHtml(u)}<div><b style="${nickStyle(u)}">${esc(clamp(u.name, 30))}</b><span>@${esc(u.login || 'user')} · ${esc(clamp(u.status || relTime(u.lastSeen), 40))}</span></div>${icon('chevronRight', 18)}</button>`
-    ).join('')}</div>`;
+      `<button class="dm-user" data-action="start-dm" data-uid="${esc(u.id)}">${avatarHtml(u)}<div><b style="${nickStyle(u)}">${esc(clamp(accountName(u), 30))}</b><span>@${esc(u.login || 'user')} · ${esc(clamp(u.status || relTime(u.lastSeen), 40))}</span></div>${icon('chevronRight', 18)}</button>`
+    ).join('') || '<div class="empty">Других зарегистрированных аккаунтов пока нет</div>'}</div>`;
   }
 
   return `<div class="modal-card ${size}">
@@ -366,8 +383,9 @@ export function invitePageHtml(store, view) {
   const code = view.invitePage || '';
   const inv = store.state.invites[code];
   const srv = inv ? store.state.servers[inv.serverId] : null;
-  const members = srv ? Object.keys(srv.members || {}).length : 0;
-  const online = srv ? Object.keys(srv.members || {}).filter(id => (store.state.users[id]?.lastSeen || 0) > Date.now() - 120000).length : 0;
+  const memberIds = srv ? Object.keys(srv.members || {}).filter(id => isRealAccount(store.state.users[id], store.state.accounts)) : [];
+  const members = memberIds.length;
+  const online = memberIds.filter(id => (store.state.users[id]?.lastSeen || 0) > Date.now() - 120000).length;
   const joined = !!(srv && srv.members && srv.members[store.uid]);
   const expired = isExpired(inv);
   const closed = !inv || !srv || expired;
@@ -475,22 +493,22 @@ export function popoverHtml(store, view) {
     </div>`;
   }
   if (p.type === 'profile') {
-    const u = s.users[p.uid] || { name: 'Участник' };
+    const u = s.users[p.uid];
+    const real = isRealAccount(u, s.accounts);
     const srv = s.servers[view.serverId];
-    const role = srv?.members?.[p.uid]?.role;
+    const role = real ? srv?.members?.[p.uid]?.role : null;
     return `<div class="popover profile-pop">
-      <div class="pop-banner" style="${esc(bannerCss(u.banner, u.bannerAnimated))}"></div>
+      <div class="pop-banner" style="${esc(bannerCss(u?.banner, u?.bannerAnimated))}"></div>
       <div class="pop-avatar">${avatarHtml(u, 'avatar-lg')}</div>
       <div class="pop-body">
-        <div class="pop-name" style="${nickStyle(u)}">${esc(clamp(u.name, 28))}<span>#${esc(u.tag || '0000')}</span></div>
+        <div class="pop-name" style="${nickStyle(u || {})}">${esc(clamp(accountName(u), 28))}${real ? `<span>#${esc(u.tag || '0000')}</span>` : ''}</div>
         ${role ? `<div class="pop-role">${icon(role === 'owner' ? 'crown' : 'shield', 13)} ${roleName(role)}${esc(srv ? ' · ' + clamp(srv.name, 24) : '')}</div>` : ''}
-        ${u.bot ? '<div class="badge badge-blurple">БОТ</div>' : ''}
         <div class="hr"></div>
-        ${u.status ? `<div class="pop-label">СТАТУС</div><div class="pop-text">${esc(u.status)}</div>` : ''}
-        ${u.bio ? `<div class="pop-label">О СЕБЕ</div><div class="pop-text">${esc(u.bio)}</div>` : ''}
-        <div class="pop-label">ШРИФТ НИКА</div><div class="pop-text">${esc(FONT_CHOICES.find(f => f.id === u.font)?.name || 'Стандартный')}</div>
-        <div class="pop-label">В DOGAPP С</div><div class="pop-text">${esc(fmtDate(u.createdAt))}</div>
-        ${p.uid !== store.uid ? `<div class="pop-actions">
+        ${real && u.status ? `<div class="pop-label">СТАТУС</div><div class="pop-text">${esc(u.status)}</div>` : ''}
+        ${real && u.bio ? `<div class="pop-label">О СЕБЕ</div><div class="pop-text">${esc(u.bio)}</div>` : ''}
+        ${real ? `<div class="pop-label">ШРИФТ НИКА</div><div class="pop-text">${esc(FONT_CHOICES.find(f => f.id === u.font)?.name || 'Стандартный')}</div>
+        <div class="pop-label">В DOGAPP С</div><div class="pop-text">${esc(fmtDate(u.createdAt))}</div>` : '<div class="pop-text">Аккаунт удалён или не зарегистрирован</div>'}
+        ${real && p.uid !== store.uid ? `<div class="pop-actions">
           <button class="btn-primary" data-action="start-dm" data-uid="${esc(p.uid)}">Написать</button>
           <button class="btn-mini" data-action="call-user" data-uid="${esc(p.uid)}" data-type="voice" data-tip="Звонок">${icon('phone', 16)}</button>
           <button class="btn-mini" data-action="call-user" data-uid="${esc(p.uid)}" data-type="video" data-tip="Видеозвонок">${icon('video', 16)}</button>

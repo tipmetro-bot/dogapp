@@ -1,6 +1,7 @@
-// dogapp — звонки: WebRTC (сигналинг через Firebase RTDB), демо-звонки и голосовые каналы
+// dogapp — реальные звонки WebRTC через сигналинг Firebase RTDB и голосовые каналы.
+// Никаких вымышленных собеседников и синтетических видеопотоков.
 import {
-  rid, esc, clamp, toast, avatarHtml, fmtTime, bannerCss, nickStyle, safeColor
+  rid, esc, clamp, toast, avatarHtml, bannerCss, nickStyle, isRealAccount, accountName
 } from './util.js';
 import { icon } from './icons.js';
 
@@ -27,7 +28,6 @@ export class CallManager {
     this.remoteDescSet = false;
     this.iceIdx = 0;
     this.processing = false;
-    this.demoTimer = null;
     this.tick = setInterval(() => {
       const c = this._currentCall();
       if (c && c.status === 'active') this._showActive(c);
@@ -38,19 +38,27 @@ export class CallManager {
   _voiceRoot() { return document.getElementById('voice-root'); }
   _currentCall() { return this.callId ? this.store.state.calls?.[this.callId] : null; }
   _other(c) { return c && (c.from === this.store.uid ? c.to : c.from); }
+  _realUser(id) { return isRealAccount(this.store.state.users?.[id], this.store.state.accounts); }
+  _iAmReal() { return this._realUser(this.store.uid); }
 
-  /* ---------- реагирование на изменения Firebase ---------- */
   update() {
     const s = this.store.state, me = this.store.uid;
     const calls = Object.values(s.calls || {});
-    // Убираем зависшие вызовы старше 90 секунд
+
     for (const c of calls) {
-      if (c.status === 'ringing' && c.createdAt < Date.now() - 90000) {
-        this.store.del(['calls', c.id], true);
-      }
+      const stale = c.status === 'ringing' && c.createdAt < Date.now() - 90000;
+      const legacy = c.demo || c.mode !== 'webrtc';
+      const wrongPeople = !this._realUser(c.from) || !this._realUser(c.to);
+      if (stale || legacy || wrongPeople) this.store.del(['calls', c.id], true);
     }
-    const incoming = calls.find(c => c.to === me && c.status === 'ringing' && c.createdAt > Date.now() - 90000);
-    const active = calls.find(c => c.status === 'active' && (c.from === me || c.to === me));
+    const valid = calls.filter(c =>
+      !c.demo && c.mode === 'webrtc' && !c.stale &&
+      this._realUser(c.from) && this._realUser(c.to) &&
+      !(c.status === 'ringing' && c.createdAt < Date.now() - 90000)
+    );
+
+    const incoming = valid.find(c => c.to === me && c.status === 'ringing');
+    const active = valid.find(c => c.status === 'active' && (c.from === me || c.to === me));
 
     if (incoming && (!this.callId || this.callId !== incoming.id)) {
       this._showIncoming(incoming);
@@ -58,7 +66,6 @@ export class CallManager {
       if (this.callId !== active.id) {
         this.callId = active.id;
         this.role = active.from === me ? 'caller' : 'callee';
-        if (active.mode === 'demo') this._startDemoRemote();
       }
       this._processSignal(active);
       this._showActive(active);
@@ -70,61 +77,55 @@ export class CallManager {
     this.renderVoice();
   }
 
-  /* ---------- исходящий звонок ---------- */
   async startCall(toUid, type) {
+    if (!this._iAmReal()) { toast('Нужен зарегистрированный аккаунт', 'error'); return; }
     if (this.callId) { toast('Сначала завершите текущий звонок', 'warn'); return; }
-    const s = this.store.state, me = this.store.uid;
-    const callee = s.users[toUid];
-    const online = callee && (callee.lastSeen || 0) > Date.now() - 120000;
-    const canWebRTC = this.store.mode === 'firebase' && online &&
-      typeof RTCPeerConnection !== 'undefined' && !!navigator.mediaDevices?.getUserMedia;
-    if (!canWebRTC) return this.startDemo(type, toUid, 'Собеседник не в сети или нет связи с Firebase — включён демо-звонок');
+    if (!this._realUser(toUid)) { toast('Можно позвонить только зарегистрированному участнику', 'error'); return; }
+    if (this.store.mode !== 'firebase') { toast('Звонки требуют подключения к Firebase', 'error'); return; }
+    if (typeof RTCPeerConnection === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      toast('Этот браузер не поддерживает WebRTC или доступ к камере и микрофону', 'error'); return;
+    }
+    const callee = this.store.state.users[toUid];
+    if ((callee?.lastSeen || 0) < Date.now() - 120000) {
+      toast('Участник не в сети', 'warn'); return;
+    }
 
-    const id = rid('call');
+    const ready = await this._prepareLocal(type);
+    if (!ready) { toast('Нет доступа к камере или микрофону — звонок отменён', 'error'); return; }
+
+    const id = rid('call'), me = this.store.uid;
     this.callId = id; this.role = 'caller';
     this.store.set(['calls', id], {
       id, from: me, to: toUid, type, mode: 'webrtc', status: 'ringing',
       createdAt: Date.now(), sdp: {}, ice: {}
     });
-    await this._prepareLocal(type);
     this._createPeer(id, toUid);
     try {
       const offer = await this.pc.createOffer();
       await this.pc.setLocalDescription(offer);
       this.store.set(['calls', id, 'sdp', me], { type: 'offer', sdp: offer.sdp }, true);
-    } catch (e) { this.mediaError = 'Не удалось создать предложение: ' + e.message; }
-    this._showActive(this._currentCall());
-  }
-
-  /* ---------- демо-звонок (работает без второго участника и без WebRTC) ---------- */
-  async startDemo(type, toUid = null, note = 'Демонстрационный звонок: собеседник смоделирован локально') {
-    if (this.callId) { toast('Сначала завершите текущий звонок', 'warn'); return; }
-    const me = this.store.uid;
-    const id = rid('call');
-    this.callId = id; this.role = 'caller';
-    this.mediaError = note;
-    this.store.set(['calls', id], {
-      id, from: me, to: toUid || 'demo', type, mode: 'demo', status: 'active',
-      createdAt: Date.now(), startedAt: Date.now(), demo: true, sdp: {}, ice: {}
-    });
-    await this._prepareLocal(type);
-    this._startDemoRemote();
+    } catch (e) {
+      this.store.del(['calls', id]);
+      this._cleanup();
+      toast('Не удалось создать звонок: ' + e.message, 'error');
+      return;
+    }
     this._showActive(this._currentCall());
   }
 
   async acceptCall(id) {
     const c = this.store.state.calls?.[id];
-    if (!c || c.to !== this.store.uid) return;
+    if (!c || c.to !== this.store.uid || !this._realUser(c.from)) return;
+    const ready = await this._prepareLocal(c.type);
+    if (!ready) {
+      this.declineCall(id);
+      toast('Нет доступа к камере или микрофону — звонок отклонён', 'error');
+      return;
+    }
     this.callId = id; this.role = 'callee';
     this.store.patch(['calls', id], { status: 'active', startedAt: Date.now() });
-    await this._prepareLocal(c.type);
-    if (c.mode === 'demo') {
-      this.mediaError = 'Демонстрационный звонок: собеседник смоделирован локально';
-      this._startDemoRemote();
-    } else {
-      this._createPeer(id, c.from);
-      await this._processSignal(c);
-    }
+    this._createPeer(id, c.from);
+    await this._processSignal(c);
     this._showActive(this.store.state.calls[id]);
   }
 
@@ -142,58 +143,16 @@ export class CallManager {
     toast('Звонок завершён');
   }
 
-  /* ---------- медиа ---------- */
   async _prepareLocal(type) {
-    this.muted = false; this.cameraOff = false; this.mediaError = this.mediaError || '';
-    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-      try { this.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: type === 'video' }); }
-      catch (e) { this.mediaError = 'Нет доступа к камере или микрофону — используется заглушка'; this.localStream = null; }
-    }
-    if (!this.localStream) this.localStream = this._syntheticStream('Вы', '#5865f2', true);
-    if (this.pc && this.localStream) {
-      for (const t of this.localStream.getTracks()) {
-        try { this.pc.addTrack(t, this.localStream); } catch (_) { }
-      }
-    }
-  }
-
-  // Синтетический видеопоток через canvas.captureStream — для демо и заглушек
-  _syntheticStream(label, color, animated = false) {
+    this.muted = false; this.cameraOff = false; this.mediaError = '';
     try {
-      const canvas = document.createElement('canvas');
-      canvas.width = 480; canvas.height = 270;
-      const ctx = canvas.getContext && canvas.getContext('2d');
-      if (!ctx || !canvas.captureStream) return null;
-      let t = 0;
-      const draw = () => {
-        ctx.fillStyle = color; ctx.fillRect(0, 0, 480, 270);
-        const g = ctx.createLinearGradient(0, 0, 480, 270);
-        g.addColorStop(0, 'rgba(255,255,255,.16)'); g.addColorStop(1, 'rgba(0,0,0,.28)');
-        ctx.fillStyle = g; ctx.fillRect(0, 0, 480, 270);
-        ctx.fillStyle = 'rgba(255,255,255,.10)';
-        for (let i = 0; i < 5; i++) {
-          const x = 60 + i * 90 + Math.sin(t + i) * 22, y = 60 + Math.cos(t * .7 + i) * 40;
-          ctx.beginPath(); ctx.arc(x, y, 26, 0, Math.PI * 2); ctx.fill();
-        }
-        ctx.fillStyle = '#fff';
-        ctx.font = '600 26px Segoe UI, Arial, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(String(label).slice(0, 26), 240, 150);
-        ctx.font = '400 14px Segoe UI, Arial, sans-serif';
-        ctx.fillStyle = 'rgba(255,255,255,.8)';
-        ctx.fillText('dogapp · ' + (animated ? 'демо-поток' : 'заглушка'), 240, 180);
-      };
-      draw();
-      if (animated) {
-        clearInterval(this.demoTimer);
-        this.demoTimer = setInterval(() => { t += .05; draw(); }, 60);
-      }
-      return canvas.captureStream(15);
-    } catch (_) { return null; }
-  }
-
-  _startDemoRemote() {
-    this.remoteStream = this._syntheticStream('Демо-собеседник', '#23a55a', true);
+      this.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: type === 'video' });
+      return !!this.localStream;
+    } catch (e) {
+      this.mediaError = e?.message || 'доступ к устройствам запрещён';
+      this.localStream = null;
+      return false;
+    }
   }
 
   _createPeer(id, other) {
@@ -258,23 +217,21 @@ export class CallManager {
   _cleanup() {
     try { if (this.localStream) for (const t of this.localStream.getTracks()) t.stop(); } catch (_) { }
     try { if (this.pc) this.pc.close(); } catch (_) { }
-    clearInterval(this.demoTimer);
     this.pc = null; this.localStream = null; this.remoteStream = null;
     this.callId = null; this.role = null; this.mediaError = '';
     this.appliedIce = new Set(); this.remoteDescSet = false;
   }
   destroy() { clearInterval(this.tick); this._cleanup(); }
 
-  /* ---------- HTML звонка ---------- */
   _showIncoming(c) {
     const r = this._root(); if (!r) return;
-    const u = this.store.state.users[c.from] || { name: 'Собеседник' };
+    const u = this.store.state.users[c.from];
     r.innerHTML = `<div class="call-incoming">
       <div class="call-incoming-banner" style="${esc(bannerCss(u.banner, u.bannerAnimated))}"></div>
       <div class="call-incoming-avatar">${avatarHtml(u, 'avatar-xl')}</div>
       <div class="call-incoming-label">ВХОДЯЩИЙ ${c.type === 'video' ? 'ВИДЕОЗВОНОК' : 'ЗВОНОК'}</div>
-      <h2 style="${nickStyle(u)}">${esc(clamp(u.name, 32))}</h2>
-      <p>${c.mode === 'demo' ? 'Демонстрационный звонок' : 'Звонок через dogapp'} · @${esc(u.login || 'user')}</p>
+      <h2 style="${nickStyle(u)}">${esc(clamp(accountName(u), 32))}</h2>
+      <p>Звонок через dogapp · @${esc(u.login || 'user')}</p>
       <div class="call-incoming-actions">
         <button class="btn-ok btn-round" data-action="call-accept" data-id="${esc(c.id)}" data-tip="Принять">${icon('phone', 22)}</button>
         <button class="btn-danger btn-round" data-action="call-decline" data-id="${esc(c.id)}" data-tip="Отклонить">${icon('phoneOff', 22)}</button>
@@ -286,7 +243,7 @@ export class CallManager {
   _showActive(c) {
     const r = this._root(); if (!r || !c) return;
     const otherId = this._other(c);
-    const u = this.store.state.users[otherId] || { name: c.mode === 'demo' ? 'Демо-собеседник' : 'Собеседник' };
+    const u = this.store.state.users[otherId] || {};
     const me = this.store.me();
     const ringing = c.status === 'ringing';
     const elapsed = c.startedAt ? dur(Date.now() - c.startedAt) : '00:00';
@@ -295,16 +252,16 @@ export class CallManager {
     r.innerHTML = `<div class="call-panel ${isVideo ? 'is-video' : ''}">
       <div class="call-panel-top">
         <span class="call-dot ${ringing ? 'ringing' : ''}"></span>
-        <div class="call-panel-title"><b>${ringing ? 'Ожидание ответа' : (c.mode === 'demo' ? 'Демо-звонок' : (isVideo ? 'Видеозвонок' : 'Голосовой звонок'))}</b><span>${esc(clamp(u.name, 26))} · ${ringing ? 'звоним…' : elapsed}</span></div>
+        <div class="call-panel-title"><b>${ringing ? 'Ожидание ответа' : (isVideo ? 'Видеозвонок' : 'Голосовой звонок')}</b><span>${esc(clamp(accountName(u), 26))} · ${ringing ? 'звоним…' : elapsed}</span></div>
         <button class="call-x" data-action="call-end" data-id="${esc(c.id)}" data-tip="Завершить">${icon('close', 16)}</button>
       </div>
       <div class="call-stage">
         ${isVideo
-          ? `<div class="call-video remote"><video data-video="remote" autoplay playsinline></video><span class="call-video-label">${esc(clamp(u.name, 22))}</span></div>
+          ? `<div class="call-video remote"><video data-video="remote" autoplay playsinline></video><span class="call-video-label">${esc(clamp(accountName(u), 22))}</span></div>
              <div class="call-video local"><video data-video="local" autoplay playsinline muted></video><span class="call-video-label">Вы</span></div>`
           : `<div class="call-voice-stage">
               ${avatarHtml(u, 'avatar-xxl')}
-              <b style="${nickStyle(u)}">${esc(clamp(u.name, 30))}</b>
+              <b style="${nickStyle(u)}">${esc(clamp(accountName(u), 30))}</b>
               <span>${ringing ? 'Идёт вызов' : 'Соединение установлено'}</span>
               <div class="call-waves"><i></i><i></i><i></i><i></i><i></i></div>
              </div>`}
@@ -313,10 +270,9 @@ export class CallManager {
       <div class="call-controls">
         <button class="call-ctrl ${this.muted ? 'off' : ''}" data-action="call-mute" data-tip="${this.muted ? 'Включить микрофон' : 'Выключить микрофон'}">${icon(this.muted ? 'micOff' : 'mic', 19)}</button>
         ${isVideo ? `<button class="call-ctrl ${this.cameraOff ? 'off' : ''}" data-action="call-camera" data-tip="${this.cameraOff ? 'Включить камеру' : 'Выключить камеру'}">${icon(this.cameraOff ? 'videoOff' : 'video', 19)}</button>` : ''}
-        <button class="call-ctrl ${c.mode === 'demo' ? 'active' : ''}" data-action="call-demo-note" data-tip="О демо-режиме">${icon('bolt', 19)}</button>
         <button class="call-ctrl hangup" data-action="call-end" data-id="${esc(c.id)}" data-tip="Завершить звонок">${icon('phoneOff', 20)}</button>
       </div>
-      <div class="call-foot">${icon('shield', 13)} ${c.mode === 'demo' ? 'Демо: видео генерируется локально, без второго участника' : 'WebRTC · сигналинг через Firebase Realtime Database'}</div>
+      <div class="call-foot">${icon('shield', 13)} WebRTC · сигналинг через Firebase Realtime Database</div>
     </div>`;
     if (isVideo) this._attachStreams();
   }
@@ -340,8 +296,8 @@ export class CallManager {
     else setTimeout(attach, 0);
   }
 
-  /* ---------- голосовые каналы ---------- */
   joinVoice(channelId) {
+    if (!this._iAmReal()) { toast('Нужен зарегистрированный аккаунт', 'error'); return; }
     const srv = this.store.state.servers[this.view.serverId];
     const ch = srv?.channels?.[channelId];
     if (!ch || ch.type !== 'voice') return;
@@ -375,17 +331,19 @@ export class CallManager {
     const srv = this.store.state.servers[this.view.serverId];
     const ch = cid && srv?.channels?.[cid];
     if (!cid || !ch) { r.innerHTML = ''; return; }
-    const people = Object.entries(this.store.state.voice?.[cid] || {});
+    const people = Object.entries(this.store.state.voice?.[cid] || {})
+      .filter(([id]) => this._realUser(id));
+    const other = people.find(([id]) => id !== this.store.uid)?.[0];
     r.innerHTML = `<div class="voice-panel">
       <div class="voice-head"><span class="voice-live"></span><div><b>${esc(clamp(ch.name, 28))}</b><span>${esc(clamp(srv.name, 28))} · ${people.length} в канале</span></div></div>
       <div class="voice-people">${people.map(([id, p]) => {
-        const u = this.store.state.users[id] || { name: 'Участник' };
-        return `<div class="voice-person" data-action="profile" data-uid="${esc(id)}">${avatarHtml(u, 'avatar-xs')}<span style="${nickStyle(u)}">${esc(clamp(u.name, 20))}</span>${p.muted ? icon('micOff', 13) : ''}</div>`;
+        const u = this.store.state.users[id];
+        return `<div class="voice-person" data-action="profile" data-uid="${esc(id)}">${avatarHtml(u, 'avatar-xs')}<span style="${nickStyle(u)}">${esc(clamp(accountName(u), 20))}</span>${p.muted ? icon('micOff', 13) : ''}</div>`;
       }).join('') || '<span class="voice-empty">Пока только вы</span>'}</div>
       <div class="voice-actions">
         <button class="btn-mini" data-action="voice-mute" data-tip="Микрофон">${icon(this.view.mic ? 'mic' : 'micOff', 15)}</button>
-        <button class="btn-mini" data-action="demo-call" data-type="video" data-tip="Демо видеозвонка">${icon('video', 15)}</button>
-        <button class="btn-mini" data-action="call-user" data-uid="${esc(people.find(([id]) => id !== this.store.uid)?.[0] || '')}" data-type="voice" data-tip="Позвонить участнику">${icon('phone', 15)}</button>
+        ${other ? `<button class="btn-mini" data-action="call-user" data-uid="${esc(other)}" data-type="voice" data-tip="Позвонить участнику">${icon('phone', 15)}</button>`
+          : `<button class="btn-mini" disabled data-tip="Нет других участников">${icon('phone', 15)}</button>`}
         <button class="btn-mini btn-mini-red" data-action="voice-leave" data-tip="Отключиться">${icon('phoneOff', 15)}</button>
       </div>
     </div>`;
@@ -396,7 +354,7 @@ export function callHeaderButtons(store, view) {
   const other = view.section === 'dm'
     ? (store.state.dms[view.dmId]?.users || []).find(id => id !== store.uid)
     : null;
-  if (!other) return '';
+  if (!other || !isRealAccount(store.state.users[other], store.state.accounts)) return '';
   return `<button class="hdr-btn" data-action="call-user" data-uid="${esc(other)}" data-type="voice" data-tip="Голосовой звонок">${icon('phone', 19)}</button>
     <button class="hdr-btn" data-action="call-user" data-uid="${esc(other)}" data-type="video" data-tip="Видеозвонок">${icon('video', 19)}</button>`;
 }
