@@ -4,20 +4,20 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#313338">
-  <meta name="description" content="dogapp — бесплатный Discord: баннеры, эмоции серверов и кастомные ссылки-приглашения.">
+  <meta name="description" content="dogapp — бесплатный Discord: аккаунты, друзья, звонки, баннеры, эмоции серверов и кастомные ссылки.">
   <title>dogapp — общение без подписок</title>
   <link rel="icon" type="image/svg+xml" href="assets/logo.svg">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
-  <!-- ============ ЗАГРУЗКА КАК В DISCORD ============ -->
+  <!-- ============ ЗАГРУЗКА ============ -->
   <div id="loader" class="loader">
     <div class="loader-blob"></div>
     <div class="loader-top">
       <img src="assets/logo.svg" alt="" class="loader-mark">
       <span>dogapp</span>
-      <span class="loader-version">v1.0 · free forever</span>
+      <span class="loader-version">v2.0 · free forever</span>
     </div>
     <div class="loader-center">
       <div class="loader-logo">
@@ -29,21 +29,23 @@
       <div class="loader-status" id="loader-status">Проверяем обновления…</div>
       <div class="loader-bar"><span></span></div>
     </div>
-    <div class="loader-tip">🐾 Подсказка: эмоции всех серверов в dogapp бесплатны — без Nitro</div>
+    <div class="loader-tip">Подсказка: эмоции всех серверов бесплатны для вас и ваших друзей</div>
     <div class="loader-foot">
-      <span>Сделано для собак и их людей</span>
+      <span>Чистый HTML, CSS и JavaScript</span>
       <span id="loader-conn">Подключение…</span>
     </div>
   </div>
+
+  <!-- ============ ВХОД / РЕГИСТРАЦИЯ ============ -->
+  <div id="auth-page" class="auth-page" hidden></div>
 
   <!-- ============ ЭКРАН ПРИГЛАШЕНИЯ ============ -->
   <div id="invite-page" class="invite-page" hidden></div>
 
   <!-- ============ ПРИЛОЖЕНИЕ ============ -->
   <div id="app" class="app" hidden>
-    <!-- рельса серверов -->
     <nav class="rail" id="rail">
-      <button id="rail-home" class="rail-btn rail-home" data-action="home" data-tip="Личные сообщения" aria-label="Личные сообщения">
+      <button id="rail-home" class="rail-btn rail-home" data-action="home" data-tip="Друзья и личные сообщения" aria-label="Друзья">
         <img src="assets/logo.svg" alt="">
       </button>
       <div class="rail-divider"></div>
@@ -59,14 +61,13 @@
       <button class="rail-btn" data-action="about" data-tip="О dogapp" aria-label="О dogapp" id="rail-info"></button>
     </nav>
 
-    <!-- боковая панель -->
     <aside class="sidebar">
       <div id="sidebar-head" class="sidebar-head"></div>
       <div id="channels" class="channels scroll"></div>
+      <div id="voice-root"></div>
       <div id="user-panel" class="user-panel"></div>
     </aside>
 
-    <!-- основная область -->
     <main class="main">
       <header id="chat-header" class="chat-header"></header>
       <div class="content">
@@ -81,6 +82,7 @@
   </div>
 
   <!-- наложения -->
+  <div id="call-root"></div>
   <div id="modal-root"></div>
   <div id="popout-root"></div>
   <div id="emoji-picker" class="emoji-picker" hidden></div>
