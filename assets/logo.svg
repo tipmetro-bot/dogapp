@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="dogapp">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7289FF"/>
+      <stop offset="1" stop-color="#4752C4"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="19" fill="url(#g)"/>
+  <!-- floppy ears -->
+  <path d="M18 17c-6 0-9 5-9 11 0 7 4 14 10 15 2 0 3-2 3-5V22c0-3-1-5-4-5z" fill="#EDF0FF"/>
+  <path d="M46 17c6 0 9 5 9 11 0 7-4 14-10 15-2 0-3-2-3-5V22c0-3 1-5 4-5z" fill="#EDF0FF"/>
+  <!-- head -->
+  <ellipse cx="32" cy="33" rx="17.5" ry="15.5" fill="#FFFFFF"/>
+  <!-- eyes -->
+  <circle cx="25.5" cy="31" r="2.9" fill="#2B2D31"/>
+  <circle cx="38.5" cy="31" r="2.9" fill="#2B2D31"/>
+  <circle cx="26.4" cy="30.1" r="0.9" fill="#FFFFFF"/>
+  <circle cx="39.4" cy="30.1" r="0.9" fill="#FFFFFF"/>
+  <!-- muzzle -->
+  <ellipse cx="32" cy="39.5" rx="8.2" ry="6.2" fill="#EDF0FF"/>
+  <path d="M28.6 37.2c0-1.5 1.5-2.4 3.4-2.4s3.4.9 3.4 2.4c0 1.7-1.5 3-3.4 3s-3.4-1.3-3.4-3z" fill="#2B2D31"/>
+  <path d="M32 40v2.2M32 42.2c-1.3 1.4-3.3 1.3-4.3.2M32 42.2c1.3 1.4 3.3 1.3 4.3.2" stroke="#2B2D31" stroke-width="1.3" stroke-linecap="round" fill="none"/>
+  <!-- tongue -->
+  <path d="M30.2 44.2c0 2.2 1 3.6 1.8 3.6s1.8-1.4 1.8-3.6z" fill="#EB459E"/>
+</svg>
